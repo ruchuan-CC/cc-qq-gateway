@@ -1,0 +1,11 @@
+# Secrets — keep your real config out of version control.
+config.toml
+
+# Build artifacts
+/bin/
+cc-qq-gateway
+*.exe
+
+# Go
+*.test
+*.out

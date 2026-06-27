@@ -1,0 +1,86 @@
+# cc-qq-gateway configuration
+# Copy to config.toml and fill in your values.
+
+[qq]
+# Credentials from the QQ Open Platform console (https://q.qq.com).
+app_id        = "YOUR_APP_ID"
+client_secret = "YOUR_APP_SECRET"
+
+# Use the sandbox OpenAPI base instead of production.
+sandbox = false
+
+# Event transport: "websocket" (dials out, no public IP required) or
+# "webhook" (QQ pushes to your HTTPS endpoint, needs a public domain/IP).
+transport = "websocket"
+
+# Gateway intents (WebSocket only). Leave empty for a conversational default
+# (group/C2C messages + public guild @-mentions + direct messages + interactions).
+# Available: GUILDS, GUILD_MEMBERS, GUILD_MESSAGES, GUILD_MESSAGE_REACTIONS,
+# DIRECT_MESSAGE, GROUP_AND_C2C_EVENT, INTERACTION, MESSAGE_AUDIT, FORUMS_EVENT,
+# AUDIO_ACTION, PUBLIC_GUILD_MESSAGES.
+intents = ["GROUP_AND_C2C_EVENT", "PUBLIC_GUILD_MESSAGES", "DIRECT_MESSAGE", "INTERACTION"]
+
+# --- Webhook settings (only used when transport = "webhook") ---
+# QQ only allows callback ports 80, 443, 8080, 8443.
+webhook_addr = ":8443"
+webhook_path = "/qqbot"
+# Provide a cert/key to terminate TLS here, or leave blank and terminate TLS at
+# a reverse proxy (nginx/caddy) in front of the gateway.
+webhook_tls_cert = ""
+webhook_tls_key  = ""
+
+[claude]
+# Path to the Claude Code CLI.
+binary = "claude"
+# The project directory Claude Code operates in. Leave empty for the gateway's
+# own working directory.
+work_dir = ""
+# Optional model override, e.g. "claude-opus-4-8". Empty uses the CLI default.
+model = ""
+
+# Permission handling for non-interactive turns. One of:
+#   default | acceptEdits | plan | bypassPermissions
+# For a "the whole server is Claude's home" setup, use bypassPermissions.
+permission_mode = "bypassPermissions"
+# Or skip all permission prompts (fully autonomous; use with care). When true,
+# this takes precedence over permission_mode. Enable for full server authority.
+dangerously_skip_permissions = true
+
+# Restrict tools if desired, e.g. ["Read", "Grep", "WebSearch"]. Leave empty for
+# unrestricted access.
+allowed_tools    = []
+disallowed_tools = []
+
+# Extra directories Claude may access (--add-dir), and any extra CLI flags. Use
+# ["/"] to grant the entire filesystem.
+add_dirs   = ["/"]
+extra_args = []
+
+# Appended to Claude's system prompt — useful to tune the chat persona and the
+# authority you want Claude to assume.
+append_system_prompt = "You are Claude, reachable directly over QQ by your operator. You have full administrative authority over this server. Be concise and chat-friendly; use plain text unless code is needed."
+
+# Per-turn timeout in seconds.
+timeout_seconds = 600
+
+[gateway]
+# Reset a conversation after this many idle minutes (starts a fresh Claude
+# session on the next message).
+session_idle_minutes = 30
+# Split long replies into chunks of at most this many characters (QQ limit).
+max_reply_chars = 1800
+# Where inbound attachments are downloaded and outbound files are staged.
+# Default: <home>/.cc-qq/media
+media_dir = ""
+# Deliver replies too long for the 5-message passive-reply budget as an uploaded
+# file (group/C2C) instead of truncating them.
+send_long_replies_as_file = true
+# Send replies as markdown (msg_type=2) instead of plain text. Requires the
+# markdown capability to be enabled for your bot.
+reply_as_markdown = false
+# Optional acknowledgement sent immediately while Claude thinks. Empty disables.
+thinking_message = ""
+# Optional allowlists. If non-empty, only these group/user openids may talk to
+# the bot.
+allowed_groups = []
+allowed_users  = []
