@@ -53,7 +53,7 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
 
 ### 1. Prerequisites
 
-- **Go 1.22+** to build.
+- **Go 1.23+** to build.
 - **Claude Code** installed and on your `PATH` (`claude --version`).
 - A QQ bot registered at the [QQ Open Platform](https://q.qq.com) with its
   **AppID** and **AppSecret**.

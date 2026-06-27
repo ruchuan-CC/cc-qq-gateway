@@ -123,8 +123,15 @@ func (g *Gateway) HandleEvent(ctx context.Context, p *qq.Payload) {
 			g.logger.Printf("[gateway] decode c2c message: %v", err)
 			return
 		}
-		if g.allowedUsers != nil && !g.allowedUsers[m.Author.UserOpenID] {
-			g.logger.Printf("[gateway] ignoring c2c message from non-allowlisted user %s", m.Author.UserOpenID)
+		if g.allowedUsers != nil {
+			if !g.allowedUsers[m.Author.UserOpenID] {
+				g.logger.Printf("[gateway] ignoring c2c message from non-allowlisted user %s", m.Author.UserOpenID)
+				return
+			}
+		} else if g.restricted() {
+			// restricted to groups only, with no C2C allowlist → don't serve private DMs
+			// (otherwise anyone could DM a full-authority bot). Mirrors the group branch.
+			g.logger.Printf("[gateway] ignoring c2c message (restricted; no allowed_users set)")
 			return
 		}
 		r := &responder{
@@ -195,8 +202,14 @@ func (g *Gateway) handleInteraction(ctx context.Context, p *qq.Payload) {
 	if g.restricted() {
 		switch it.ChatType {
 		case qq.InteractionChatTypeC2C:
-			if g.allowedUsers != nil && !g.allowedUsers[it.UserOpenID] {
-				g.logger.Printf("[gateway] ignoring interaction from non-allowlisted user %s", it.UserOpenID)
+			if g.allowedUsers != nil {
+				if !g.allowedUsers[it.UserOpenID] {
+					g.logger.Printf("[gateway] ignoring interaction from non-allowlisted user %s", it.UserOpenID)
+					return
+				}
+			} else {
+				// restricted with no C2C allowlist → ignore C2C button callbacks too
+				g.logger.Printf("[gateway] ignoring c2c interaction (restricted; no allowed_users set)")
 				return
 			}
 		case qq.InteractionChatTypeGroup:
@@ -278,6 +291,9 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 
 	switch canon {
 	case "new":
+		// Cancel any in-flight turn first; otherwise it would finish and write its
+		// session id back, silently resurrecting the context we're trying to clear.
+		g.sessions.Get(key).CancelTurn()
 		g.sessions.Reset(key)
 		_ = r.Send(ctx, "✅ **已开启新对话**，上下文已清空。")
 	case "model":
@@ -322,6 +338,15 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		}
 	case "status":
 		_ = r.Send(ctx, g.statusText(key))
+	case "whoami":
+		_ = r.Send(ctx, "**🪪 你的身份**\n"+r.identity()+
+			"\n\n把对应的 open_id 填入配置的 `allowed_users` / `allowed_groups` 即可锁定操作者。")
+	case "version":
+		_ = r.Send(ctx, fmt.Sprintf("**🏷️ 版本** cc-qq-gateway v%s · 运行 %s", Version, g.uptime()))
+	case "ping":
+		_ = r.Send(ctx, "🏓 pong · 运行 "+g.uptime())
+	case "sessions":
+		_ = r.Send(ctx, g.sessionsText())
 	case "help":
 		_ = r.Send(ctx, helpText)
 	default:
@@ -330,11 +355,17 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	return true
 }
 
-// cmdModel shows or sets the per-conversation model override.
+// modelHint lists the model names the CLI accepts, shown when a name is unknown.
+const modelHint = "可用：`opus` / `sonnet` / `haiku` / `fable`（或完整 id，如 `claude-opus-4-8[1m]`）。恢复默认：`/model default`"
+
+// cmdModel shows or sets the per-conversation model override. The argument is
+// normalized to a value the CLI's --model accepts (display names like
+// "Opus 4.8 (1M context)" are translated, not passed through), and an
+// unrecognized name is rejected instead of being stored and wedging every turn.
 func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
-	if arg == "" {
-		cur := sess.Model
+	if strings.TrimSpace(arg) == "" {
+		cur := sess.GetModel()
 		if cur == "" {
 			cur = g.bridge.DefaultModel()
 			if cur == "" {
@@ -342,23 +373,27 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += " (default)"
 		}
-		_ = r.Send(ctx, "**🧠 模型** `"+cur+"`\n切换：`/model <名称>` · 恢复默认：`/model default`")
+		_ = r.Send(ctx, "**🧠 模型** `"+cur+"`\n切换：`/model <名称>`\n"+modelHint)
 		return
 	}
-	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
-		sess.Model = ""
+	canon, ok := claude.NormalizeModel(arg)
+	if !ok {
+		_ = r.Send(ctx, "⚠️ 无法识别的模型名 `"+arg+"`。\n"+modelHint)
+		return
+	}
+	sess.SetModel(canon)
+	if canon == "" {
 		_ = r.Send(ctx, "**🧠 模型** 已恢复默认。")
 		return
 	}
-	sess.Model = arg
-	_ = r.Send(ctx, "**🧠 模型** 已切换为 `"+arg+"`")
+	_ = r.Send(ctx, "**🧠 模型** 已切换为 `"+canon+"`")
 }
 
 // cmdCwd shows or sets the per-conversation working directory override.
 func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
 	if arg == "" {
-		cur := sess.WorkDir
+		cur := sess.GetWorkDir()
 		if cur == "" {
 			cur = g.bridge.DefaultWorkDir()
 			if cur == "" {
@@ -370,11 +405,11 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 		return
 	}
 	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
-		sess.WorkDir = ""
+		sess.SetWorkDir("")
 		_ = r.Send(ctx, "**📁 工作目录** 已恢复默认。")
 		return
 	}
-	sess.WorkDir = arg
+	sess.SetWorkDir(arg)
 	_ = r.Send(ctx, "**📁 工作目录** 已切换为 `"+arg+"`")
 }
 
@@ -382,7 +417,7 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
 	if arg == "" {
-		cur := sess.Mode
+		cur := sess.GetMode()
 		if cur == "" {
 			cur = "默认（按网关配置）"
 		}
@@ -392,7 +427,7 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 	norm := arg
 	switch strings.ToLower(arg) {
 	case "default", "reset":
-		sess.Mode = ""
+		sess.SetMode("")
 		_ = r.Send(ctx, "**🔐 权限模式** 已恢复默认。")
 		return
 	case "plan":
@@ -405,7 +440,7 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 		_ = r.Send(ctx, "❓ 未知模式 `"+arg+"`，可选：default / plan / acceptEdits / bypass")
 		return
 	}
-	sess.Mode = norm
+	sess.SetMode(norm)
 	_ = r.Send(ctx, "**🔐 权限模式** 已切换为 `"+norm+"`")
 }
 
@@ -569,18 +604,19 @@ func prettyPlan(tier string) string {
 
 func (g *Gateway) statusText(key string) string {
 	s := g.sessions.Get(key)
+	sid := s.GetSessionID()
 	status := "新会话"
-	if s.ClaudeSessionID != "" {
-		status = "已连接 · " + short(s.ClaudeSessionID)
+	if sid != "" {
+		status = "已连接 · " + short(sid)
 	}
-	model := s.Model
+	model := s.GetModel()
 	if model == "" {
 		model = g.bridge.DefaultModel()
 		if model == "" {
 			model = "默认"
 		}
 	}
-	workDir := s.WorkDir
+	workDir := s.GetWorkDir()
 	if workDir == "" {
 		workDir = g.bridge.DefaultWorkDir()
 		if workDir == "" {
@@ -603,11 +639,35 @@ func (g *Gateway) statusText(key string) string {
 			"**权限** %s\n"+
 			"**任务** %s · **轮数** %d\n"+
 			"**运行** %s · v%s",
-		status, model, workDir, authority, running, s.Turns, g.uptime(), Version)
+		status, model, workDir, authority, running, s.TurnCount(), g.uptime(), Version)
 }
 
 func (g *Gateway) uptime() string {
 	return time.Since(g.startedAt).Round(time.Second).String()
+}
+
+// sessionsText summarizes all live conversations, for /sessions.
+func (g *Gateway) sessionsText() string {
+	snaps := g.sessions.Snapshot()
+	if len(snaps) == 0 {
+		return "**💬 会话** 暂无活跃会话。"
+	}
+	turns, cost := g.usageSnapshot()
+	var b strings.Builder
+	fmt.Fprintf(&b, "**💬 活跃会话** %d 个 · 累计 %d 轮 · $%.4f\n", len(snaps), turns, cost)
+	for _, s := range snaps {
+		state := "空闲"
+		if s.Running {
+			state = "运行中"
+		}
+		conn := "新会话"
+		if s.Active {
+			conn = "已连接"
+		}
+		idle := time.Since(s.LastActive).Round(time.Second)
+		fmt.Fprintf(&b, "· `%s` — %s · %s · %d 轮 · 闲置 %s\n", s.Key, conn, state, s.Turns, idle)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // commandAliases maps every accepted command token (English + Chinese) to its
@@ -639,6 +699,10 @@ var commandAliases = map[string]string{
 	"/usage": "usage", "额度": "usage", "用量": "usage",
 	"/cost": "cost", "花费": "cost",
 	"/status": "status", "/stat": "status", "状态": "status",
+	"/whoami": "whoami", "/me": "whoami", "我是谁": "whoami",
+	"/sessions": "sessions", "/conv": "sessions", "会话": "sessions",
+	"/version": "version", "/ver": "version", "版本": "version",
+	"/ping": "ping",
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
@@ -654,7 +718,9 @@ const helpText = "**🤖 Claude Code · QQ** —— 直接说需求即可，命�
 	"| /mode | 权限模式 | /web | 联网搜索 |\n" +
 	"| /usage | 用量额度 | /doctor | 环境诊断 |\n" +
 	"| /cost | 上次花费 | /init | 生成 CLAUDE.md |\n" +
-	"| /status | 运行状态 | /help | 显示帮助 |"
+	"| /status | 运行状态 | /sessions | 活跃会话 |\n" +
+	"| /whoami | 我的 open_id | /version | 版本信息 |\n" +
+	"| /help | 显示帮助 | | |"
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message.
 const maxPassiveReplies = 5
@@ -691,27 +757,47 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		}
 	}
 
-	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, sess.ClaudeSessionID != "")
+	resuming := sess.GetSessionID()
+	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, resuming != "")
 	res, err := g.bridge.Run(turnCtx, claude.Request{
-		SessionID:      sess.ClaudeSessionID,
+		SessionID:      resuming,
 		Prompt:         prompt,
-		Model:          sess.Model,
-		WorkDir:        sess.WorkDir,
-		PermissionMode: sess.Mode,
+		Model:          sess.GetModel(),
+		WorkDir:        sess.GetWorkDir(),
+		PermissionMode: sess.GetMode(),
 	})
 	if err != nil {
 		if turnCtx.Err() == context.Canceled {
 			g.logger.Printf("[gateway] [%s] turn cancelled", key)
 			return
 		}
+		// A hard failure (process error / timeout / an unresumable session id). If we
+		// were resuming, the stored id may be stale — clear it so the NEXT message
+		// starts a fresh conversation instead of re-failing forever on a bad --resume.
+		if resuming != "" {
+			sess.ClearClaude()
+			g.logger.Printf("[gateway] [%s] cleared possibly-stale session id after error", key)
+		}
 		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
 		_ = r.Send(ctx, "⚠️ 出错了 (Claude error): "+short(err.Error()))
 		return
 	}
-	if res.SessionID != "" {
-		sess.ClaudeSessionID = res.SessionID
+	// The CLI exits 0 even when the turn itself errored (e.g. a bad --model 404s, or an
+	// auth problem): is_error marks that. Surface it as an error and do NOT advance the
+	// session — persisting the id/turn here is what previously wedged the conversation.
+	if res.IsError {
+		g.logger.Printf("[gateway] [%s] claude returned is_error: %s", key, short(res.Text))
+		msg := "⚠️ Claude 返回错误：" + strings.TrimSpace(res.Text)
+		if strings.Contains(strings.ToLower(res.Text), "model") {
+			msg += "\n\n可能是模型设置问题，试试 `/model default` 恢复默认模型。"
+		}
+		_ = r.Send(ctx, msg)
+		return
 	}
-	sess.Turns++
+	if res.SessionID != "" {
+		sess.SetSessionID(res.SessionID)
+	}
+	sess.IncTurn()
 	sess.RecordTurn(text, res.CostUSD, res.DurationMS)
 	g.addUsage(res.CostUSD)
 

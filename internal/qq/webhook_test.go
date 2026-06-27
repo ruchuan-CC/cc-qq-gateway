@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testSecret = "dummy-bot-secret-1234"
@@ -82,8 +84,8 @@ func TestWebhookEventDispatch(t *testing.T) {
 	s := NewWebhookServer(testSecret, "/qqbot", func(_ context.Context, p *Payload) { got = p }, nil)
 
 	_, priv := deriveEd25519(testSecret)
-	body := []byte(`{"op":0,"s":5,"t":"C2C_MESSAGE_CREATE","d":{"id":"abc","content":"hi"}}`)
-	timestamp := "1700000001"
+	body := []byte(`{"id":"evt-1","op":0,"s":5,"t":"C2C_MESSAGE_CREATE","d":{"id":"abc","content":"hi"}}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10) // fresh — passes the skew check
 	var msg bytes.Buffer
 	msg.WriteString(timestamp)
 	msg.Write(body)
@@ -100,6 +102,66 @@ func TestWebhookEventDispatch(t *testing.T) {
 	}
 	if got == nil || got.Type != EventC2CMessageCreate {
 		t.Fatalf("handler did not receive the event; got %+v", got)
+	}
+}
+
+// TestWebhookRejectsStalePush verifies the timestamp-skew replay guard.
+func TestWebhookRejectsStalePush(t *testing.T) {
+	s := NewWebhookServer(testSecret, "/qqbot", func(context.Context, *Payload) {}, nil)
+	_, priv := deriveEd25519(testSecret)
+	body := []byte(`{"id":"evt-2","op":0,"t":"C2C_MESSAGE_CREATE","d":{}}`)
+	timestamp := "1700000001" // years old → stale
+	var msg bytes.Buffer
+	msg.WriteString(timestamp)
+	msg.Write(body)
+	sig := hex.EncodeToString(ed25519.Sign(priv, msg.Bytes()))
+	req := httptest.NewRequest(http.MethodPost, "/qqbot", bytes.NewReader(body))
+	req.Header.Set("X-Signature-Ed25519", sig)
+	req.Header.Set("X-Signature-Timestamp", timestamp)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("stale push status = %d, want 401", rec.Code)
+	}
+}
+
+// TestWebhookDedupesRedelivery verifies a redelivered push id runs the handler once.
+func TestWebhookDedupesRedelivery(t *testing.T) {
+	calls := 0
+	s := NewWebhookServer(testSecret, "/qqbot", func(context.Context, *Payload) { calls++ }, nil)
+	_, priv := deriveEd25519(testSecret)
+	body := []byte(`{"id":"evt-dup","op":0,"t":"C2C_MESSAGE_CREATE","d":{}}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	var msg bytes.Buffer
+	msg.WriteString(timestamp)
+	msg.Write(body)
+	sig := hex.EncodeToString(ed25519.Sign(priv, msg.Bytes()))
+	send := func() {
+		req := httptest.NewRequest(http.MethodPost, "/qqbot", bytes.NewReader(body))
+		req.Header.Set("X-Signature-Ed25519", sig)
+		req.Header.Set("X-Signature-Timestamp", timestamp)
+		s.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+	send()
+	send()
+	if calls != 1 {
+		t.Fatalf("handler called %d times, want 1 (dedup)", calls)
+	}
+}
+
+// TestWebhookRejectsOracleToken verifies the op-13 plain_token guard refuses a
+// JSON-shaped token (which would let the validation path sign a forged push body).
+func TestWebhookRejectsOracleToken(t *testing.T) {
+	s := NewWebhookServer(testSecret, "/qqbot", nil, nil)
+	body, _ := json.Marshal(Payload{
+		Op:   OpCallbackValidation,
+		Data: mustJSON(CallbackValidation{PlainToken: `{"op":0,"t":"C2C_MESSAGE_CREATE"}`, EventTs: "1725442341"}),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/qqbot", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oracle-token status = %d, want 400", rec.Code)
 	}
 }
 

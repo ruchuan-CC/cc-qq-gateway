@@ -141,6 +141,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("claude.work_dir %q: %w", c.Claude.WorkDir, err)
 		}
 	}
+	switch c.Claude.PermissionMode {
+	case "", "default", "plan", "acceptEdits", "bypassPermissions", "auto", "dontAsk":
+		// valid CLI --permission-mode values (empty = leave the CLI default)
+	default:
+		return fmt.Errorf("claude.permission_mode %q is invalid (use one of: default, plan, "+
+			"acceptEdits, bypassPermissions, auto, dontAsk)", c.Claude.PermissionMode)
+	}
 	return nil
 }
 

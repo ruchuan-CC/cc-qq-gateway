@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -83,8 +84,17 @@ func (r *responder) Send(ctx context.Context, text string) error {
 	useMarkdown := r.asMarkdown && !markdownDisabled.Load()
 	err := r.sendOnce(ctx, text, useMarkdown)
 	if err != nil && useMarkdown {
-		log.Printf("[gateway] markdown send rejected (%v); falling back to plain text for this session", err)
-		markdownDisabled.Store(true)
+		// Always retry as plain text so the message is still delivered. Only disable
+		// markdown PROCESS-WIDE when the API itself rejected it (a 4xx APIError — e.g.
+		// passive markdown not approved); a transient network/5xx error must NOT
+		// permanently downgrade every future conversation to plain text.
+		var apiErr *qq.APIError
+		if errors.As(err, &apiErr) && apiErr.HTTPStatus >= 400 && apiErr.HTTPStatus < 500 {
+			log.Printf("[gateway] markdown rejected by API (%v); falling back to plain text for the process", err)
+			markdownDisabled.Store(true)
+		} else {
+			log.Printf("[gateway] markdown send failed transiently (%v); retrying as text (markdown stays enabled)", err)
+		}
 		return r.sendOnce(ctx, text, false)
 	}
 	return err

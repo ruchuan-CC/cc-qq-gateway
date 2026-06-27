@@ -8,14 +8,27 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+// webhookMaxSkew is how far a push's signed timestamp may be from now before it
+// is rejected as stale (replay protection).
+const webhookMaxSkew = 5 * time.Minute
 
 // deriveEd25519 builds the deterministic Ed25519 keypair from the bot secret,
 // per the official webhook spec: the seed is the secret repeated until it is at
 // least 32 bytes, then truncated to 32 bytes.
 func deriveEd25519(botSecret string) (ed25519.PublicKey, ed25519.PrivateKey) {
 	seed := botSecret
+	if seed == "" {
+		// An empty secret would make the repeat-to-32 loop below spin forever. Config
+		// validation already requires a non-empty client_secret, but guard anyway so a
+		// programming error surfaces as nil keys (every verify fails) rather than a hang.
+		return nil, nil
+	}
 	for len(seed) < ed25519.SeedSize {
 		seed = strings.Repeat(seed, 2)
 	}
@@ -33,6 +46,9 @@ type WebhookServer struct {
 	handler EventHandler
 	logger  *log.Logger
 	path    string
+
+	mu   sync.Mutex
+	seen map[string]int64 // recently-handled push id → unix sec (replay dedup)
 }
 
 // NewWebhookServer builds a webhook transport. path is the HTTP route to serve
@@ -52,7 +68,53 @@ func NewWebhookServer(botSecret, path string, handler EventHandler, logger *log.
 		handler: handler,
 		logger:  logger,
 		path:    path,
+		seen:    make(map[string]int64),
 	}
+}
+
+// validPlainToken constrains the op-13 challenge token QQ sends (a short
+// alphanumeric/base64 token). Rejecting long or JSON-shaped values stops the
+// validation endpoint from being abused as a general Ed25519 signing oracle to
+// forge a push body (which is JSON, i.e. contains braces/quotes) under the same key.
+func validPlainToken(t string) bool {
+	if t == "" || len(t) > 128 {
+		return false
+	}
+	return !strings.ContainsAny(t, "{}\"\\ \t\r\n")
+}
+
+// freshEnough reports whether the signed timestamp is within the allowed skew.
+// If the header can't be parsed as unix seconds the check is skipped (signature
+// verification still applies) so an unexpected format never drops valid traffic.
+func freshEnough(timestamp string) bool {
+	ts, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
+	if err != nil {
+		return true
+	}
+	delta := time.Since(time.Unix(ts, 0))
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= webhookMaxSkew
+}
+
+// duplicate reports whether this push id was handled recently, recording it if
+// not. Bounded: the table is cleared once it grows large (coarse but sufficient
+// for at-least-once redelivery within a short window).
+func (s *WebhookServer) duplicate(id string) bool {
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.seen[id]; ok {
+		return true
+	}
+	if len(s.seen) > 4096 {
+		s.seen = make(map[string]int64)
+	}
+	s.seen[id] = time.Now().Unix()
+	return false
 }
 
 // Path returns the configured HTTP route.
@@ -88,6 +150,11 @@ func (s *WebhookServer) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad validation payload", http.StatusBadRequest)
 			return
 		}
+		if !validPlainToken(v.PlainToken) {
+			s.logger.Printf("[webhook] rejecting validation with out-of-spec plain_token")
+			http.Error(w, "bad validation payload", http.StatusBadRequest)
+			return
+		}
 		var msg bytes.Buffer
 		msg.WriteString(v.EventTs)
 		msg.WriteString(v.PlainToken)
@@ -108,10 +175,21 @@ func (s *WebhookServer) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
+	// Reject stale (replayed) pushes outside the allowed timestamp skew.
+	if !freshEnough(r.Header.Get("X-Signature-Timestamp")) {
+		s.logger.Printf("[webhook] rejecting stale push (timestamp outside %s)", webhookMaxSkew)
+		http.Error(w, "stale", http.StatusUnauthorized)
+		return
+	}
 
-	// Dispatch op-0 events to the handler.
+	// Dispatch op-0 events to the handler, de-duplicating at-least-once redelivery
+	// so a replayed/redelivered push never double-executes a command.
 	if p.Op == OpDispatch && s.handler != nil {
-		s.handler(r.Context(), &p)
+		if s.duplicate(p.ID) {
+			s.logger.Printf("[webhook] skipping duplicate push id=%s", p.ID)
+		} else {
+			s.handler(r.Context(), &p)
+		}
 	}
 
 	// Acknowledge receipt.

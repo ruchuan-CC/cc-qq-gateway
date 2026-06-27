@@ -35,10 +35,17 @@ func New(cfg *config.Config, logger *log.Logger) *App {
 		ClientSecret: cfg.QQ.ClientSecret,
 		Sandbox:      cfg.QQ.Sandbox,
 	})
+	// Normalize a config-provided model the same way /model does, so a display name
+	// in config.toml (e.g. "Opus 4.8 (1M context)") becomes a CLI-valid id instead
+	// of failing every turn. An unrecognized value is left as-is for the CLI to judge.
+	defaultModel := cfg.Claude.Model
+	if norm, ok := claude.NormalizeModel(defaultModel); ok {
+		defaultModel = norm
+	}
 	bridge := claude.New(claude.Config{
 		Binary:                     cfg.Claude.Binary,
 		WorkDir:                    cfg.Claude.WorkDir,
-		Model:                      cfg.Claude.Model,
+		Model:                      defaultModel,
 		PermissionMode:             cfg.Claude.PermissionMode,
 		DangerouslySkipPermissions: cfg.Claude.DangerouslySkipPermissions,
 		AllowedTools:               cfg.Claude.AllowedTools,

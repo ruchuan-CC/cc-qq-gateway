@@ -124,10 +124,53 @@ func (s *Session) Running() bool {
 	return s.running
 }
 
-// NextSeq returns and increments the passive-reply sequence number.
-func (s *Session) NextSeq() int {
-	s.MsgSeq++
-	return s.MsgSeq
+// The per-conversation override fields (Model/WorkDir/Mode) and the Claude
+// session bookkeeping (ClaudeSessionID/Turns/MsgSeq) are mutated by control
+// commands (/model, /dir, /mode, /new) and the idle-reset path WHILE a turn is
+// concurrently reading them under mu. They are therefore guarded by ctrl (the
+// same lock /stop uses), so a command can update them while mu is held by a turn
+// without a data race. runTurn must access them only through these accessors.
+
+// GetModel / SetModel get/set the per-conversation model override.
+func (s *Session) GetModel() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Model }
+func (s *Session) SetModel(v string) { s.ctrl.Lock(); s.Model = v; s.ctrl.Unlock() }
+
+// GetWorkDir / SetWorkDir get/set the per-conversation working-directory override.
+func (s *Session) GetWorkDir() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.WorkDir }
+func (s *Session) SetWorkDir(v string) { s.ctrl.Lock(); s.WorkDir = v; s.ctrl.Unlock() }
+
+// GetMode / SetMode get/set the per-conversation permission-mode override.
+func (s *Session) GetMode() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Mode }
+func (s *Session) SetMode(v string) { s.ctrl.Lock(); s.Mode = v; s.ctrl.Unlock() }
+
+// GetSessionID / SetSessionID get/set the resumable Claude session id.
+func (s *Session) GetSessionID() string {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.ClaudeSessionID
+}
+func (s *Session) SetSessionID(v string) { s.ctrl.Lock(); s.ClaudeSessionID = v; s.ctrl.Unlock() }
+
+// IncTurn increments and returns the completed-turn count.
+func (s *Session) IncTurn() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); s.Turns++; return s.Turns }
+
+// TurnCount returns the completed-turn count.
+func (s *Session) TurnCount() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Turns }
+
+// HasSession reports whether a resumable Claude session id is set.
+func (s *Session) HasSession() bool {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.ClaudeSessionID != ""
+}
+
+// ClearClaude clears the resumable session id (and the reply seq), starting a
+// fresh Claude conversation on the next turn.
+func (s *Session) ClearClaude() {
+	s.ctrl.Lock()
+	s.ClaudeSessionID = ""
+	s.MsgSeq = 0
+	s.ctrl.Unlock()
 }
 
 // Manager owns the set of live sessions.
@@ -161,8 +204,7 @@ func (m *Manager) Get(key string) *Session {
 		return s
 	}
 	if m.idleTTL > 0 && now.Sub(s.LastActive) > m.idleTTL {
-		s.ClaudeSessionID = ""
-		s.MsgSeq = 0
+		s.ClearClaude()
 	}
 	s.LastActive = now
 	return s
@@ -177,8 +219,7 @@ func (m *Manager) Reset(key string) bool {
 	if !ok {
 		return false
 	}
-	s.ClaudeSessionID = ""
-	s.MsgSeq = 0
+	s.ClearClaude()
 	return true
 }
 
@@ -215,9 +256,9 @@ func (m *Manager) Snapshot() []Summary {
 	for _, s := range m.sessions {
 		out = append(out, Summary{
 			Key:        s.Key,
-			Active:     s.ClaudeSessionID != "",
+			Active:     s.HasSession(),
 			Running:    s.Running(),
-			Turns:      s.Turns,
+			Turns:      s.TurnCount(),
 			LastActive: s.LastActive,
 		})
 	}
