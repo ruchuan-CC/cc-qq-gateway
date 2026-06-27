@@ -13,12 +13,10 @@ sandbox = false
 # "webhook" (QQ pushes to your HTTPS endpoint, needs a public domain/IP).
 transport = "websocket"
 
-# Gateway intents (WebSocket only). Leave empty for a conversational default
-# (group/C2C messages + public guild @-mentions + direct messages + interactions).
-# Available: GUILDS, GUILD_MEMBERS, GUILD_MESSAGES, GUILD_MESSAGE_REACTIONS,
-# DIRECT_MESSAGE, GROUP_AND_C2C_EVENT, INTERACTION, MESSAGE_AUDIT, FORUMS_EVENT,
-# AUDIO_ACTION, PUBLIC_GUILD_MESSAGES.
-intents = ["GROUP_AND_C2C_EVENT", "PUBLIC_GUILD_MESSAGES", "DIRECT_MESSAGE", "INTERACTION"]
+# Gateway intents (WebSocket only). This is a SINGLE-CHAT (C2C / private) gateway,
+# so only GROUP_AND_C2C_EVENT is needed — it's the bit that delivers private
+# messages. Leave empty to use this same default.
+intents = ["GROUP_AND_C2C_EVENT"]
 
 # --- Webhook settings (only used when transport = "webhook") ---
 # QQ only allows callback ports 80, 443, 8080, 8443.
@@ -73,14 +71,13 @@ max_reply_chars = 1800
 # Default: <home>/.cc-qq/media
 media_dir = ""
 # Deliver replies too long for the 5-message passive-reply budget as an uploaded
-# file (group/C2C) instead of truncating them.
+# file instead of truncating them.
 send_long_replies_as_file = true
 # Send replies as markdown (msg_type=2) instead of plain text. Requires the
 # markdown capability to be enabled for your bot.
 reply_as_markdown = false
 # Optional acknowledgement sent immediately while Claude thinks. Empty disables.
 thinking_message = ""
-# Optional allowlists. If non-empty, only these group/user openids may talk to
-# the bot.
-allowed_groups = []
-allowed_users  = []
+# Optional allowlist. If non-empty, only these C2C (single-chat) user open_ids may
+# talk to the bot. Empty serves any user. Send /whoami to learn your open_id.
+allowed_users = []

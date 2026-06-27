@@ -30,8 +30,7 @@ type Gateway struct {
 	cfg      config.GatewayConfig
 	logger   *log.Logger
 
-	allowedGroups map[string]bool
-	allowedUsers  map[string]bool
+	allowedUsers map[string]bool
 
 	startedAt time.Time
 
@@ -60,24 +59,15 @@ func New(client *qq.Client, bridge *claude.Bridge, sessions *session.Manager, cf
 		logger = log.Default()
 	}
 	g := &Gateway{
-		client:        client,
-		bridge:        bridge,
-		sessions:      sessions,
-		cfg:           cfg,
-		logger:        logger,
-		allowedGroups: toSet(cfg.AllowedGroups),
-		allowedUsers:  toSet(cfg.AllowedUsers),
-		startedAt:     time.Now(),
+		client:       client,
+		bridge:       bridge,
+		sessions:     sessions,
+		cfg:          cfg,
+		logger:       logger,
+		allowedUsers: toSet(cfg.AllowedUsers),
+		startedAt:    time.Now(),
 	}
 	return g
-}
-
-// restricted reports whether any allowlist is configured. In restricted mode the
-// bot serves only whitelisted C2C users and explicitly-allowlisted groups, and
-// ignores guild channels and guild DMs entirely (those surfaces have no per-user
-// allowlist, so leaving them open would defeat "lock to my id").
-func (g *Gateway) restricted() bool {
-	return g.allowedUsers != nil || g.allowedGroups != nil
 }
 
 func toSet(items []string) map[string]bool {
@@ -91,155 +81,34 @@ func toSet(items []string) map[string]bool {
 	return m
 }
 
-// HandleEvent is the qq.EventHandler. It classifies the event and, for inbound
-// conversational messages, dispatches a Claude turn asynchronously.
+// HandleEvent is the qq.EventHandler. This gateway is single-chat only: it
+// handles the C2C (private) message event and ignores everything else.
 func (g *Gateway) HandleEvent(ctx context.Context, p *qq.Payload) {
 	switch p.Type {
-	case qq.EventGroupAtMessageCreate:
-		var m qq.GroupAtMessage
-		if err := json.Unmarshal(p.Data, &m); err != nil {
-			g.logger.Printf("[gateway] decode group message: %v", err)
-			return
-		}
-		if g.allowedGroups != nil {
-			if !g.allowedGroups[m.GroupOpenID] {
-				g.logger.Printf("[gateway] ignoring group message from non-allowlisted group %s", m.GroupOpenID)
-				return
-			}
-		} else if g.restricted() {
-			g.logger.Printf("[gateway] ignoring group message (locked to allowed_users; no groups allowlisted)")
-			return
-		}
-		r := &responder{
-			client: g.client, kind: kindGroup,
-			groupOpenID: m.GroupOpenID, msgID: m.ID,
-			asMarkdown: g.cfg.ReplyAsMarkdown,
-		}
-		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
-
 	case qq.EventC2CMessageCreate:
 		var m qq.C2CMessage
 		if err := json.Unmarshal(p.Data, &m); err != nil {
 			g.logger.Printf("[gateway] decode c2c message: %v", err)
 			return
 		}
-		if g.allowedUsers != nil {
-			if !g.allowedUsers[m.Author.UserOpenID] {
-				g.logger.Printf("[gateway] ignoring c2c message from non-allowlisted user %s", m.Author.UserOpenID)
-				return
-			}
-		} else if g.restricted() {
-			// restricted to groups only, with no C2C allowlist → don't serve private DMs
-			// (otherwise anyone could DM a full-authority bot). Mirrors the group branch.
-			g.logger.Printf("[gateway] ignoring c2c message (restricted; no allowed_users set)")
+		if g.allowedUsers != nil && !g.allowedUsers[m.Author.UserOpenID] {
+			g.logger.Printf("[gateway] ignoring c2c message from non-allowlisted user %s", m.Author.UserOpenID)
 			return
 		}
 		r := &responder{
-			client: g.client, kind: kindC2C,
-			userOpenID: m.Author.UserOpenID, msgID: m.ID,
+			client:     g.client,
+			userOpenID: m.Author.UserOpenID,
+			msgID:      m.ID,
 			asMarkdown: g.cfg.ReplyAsMarkdown,
 		}
 		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
 
-	case qq.EventAtMessageCreate, qq.EventMessageCreate:
-		if g.restricted() {
-			g.logger.Printf("[gateway] ignoring guild channel message (restricted mode)")
-			return
-		}
-		var m qq.Message
-		if err := json.Unmarshal(p.Data, &m); err != nil {
-			g.logger.Printf("[gateway] decode channel message: %v", err)
-			return
-		}
-		r := &responder{
-			client: g.client, kind: kindChannel,
-			channelID: m.ChannelID, msgID: m.ID,
-			asMarkdown: g.cfg.ReplyAsMarkdown,
-		}
-		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
-
-	case qq.EventDirectMessageCreate:
-		if g.restricted() {
-			g.logger.Printf("[gateway] ignoring guild direct message (restricted mode)")
-			return
-		}
-		var m qq.Message
-		if err := json.Unmarshal(p.Data, &m); err != nil {
-			g.logger.Printf("[gateway] decode direct message: %v", err)
-			return
-		}
-		r := &responder{
-			client: g.client, kind: kindDM,
-			guildID: m.GuildID, msgID: m.ID,
-			asMarkdown: g.cfg.ReplyAsMarkdown,
-		}
-		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
-
-	case qq.EventInteractionCreate:
-		g.handleInteraction(ctx, p)
-
-	case qq.EventGroupAddRobot:
-		g.logger.Printf("[gateway] bot added to a group")
-	case qq.EventFriendAdd:
-		g.logger.Printf("[gateway] user added the bot as a friend")
+	case qq.EventReady, qq.EventResumed:
+		// WebSocket lifecycle — handled by the transport (session tracking); nothing to do here.
 	default:
-		// Other events (guild/channel/member lifecycle, reactions, audit, audio)
-		// are received and logged; extend here as needed.
-		g.logger.Printf("[gateway] event %s received", p.Type)
+		// Single-chat only: every other QQ surface/event is ignored.
+		g.logger.Printf("[gateway] ignoring non-C2C event %s", p.Type)
 	}
-}
-
-// handleInteraction acknowledges button callbacks so the user gets immediate
-// feedback, then treats the button data as a conversational prompt.
-func (g *Gateway) handleInteraction(ctx context.Context, p *qq.Payload) {
-	var it qq.Interaction
-	if err := json.Unmarshal(p.Data, &it); err != nil {
-		g.logger.Printf("[gateway] decode interaction: %v", err)
-		return
-	}
-	// Enforce the allowlist on interactions too, so button callbacks can't be
-	// used to bypass the restriction.
-	if g.restricted() {
-		switch it.ChatType {
-		case qq.InteractionChatTypeC2C:
-			if g.allowedUsers != nil {
-				if !g.allowedUsers[it.UserOpenID] {
-					g.logger.Printf("[gateway] ignoring interaction from non-allowlisted user %s", it.UserOpenID)
-					return
-				}
-			} else {
-				// restricted with no C2C allowlist → ignore C2C button callbacks too
-				g.logger.Printf("[gateway] ignoring c2c interaction (restricted; no allowed_users set)")
-				return
-			}
-		case qq.InteractionChatTypeGroup:
-			if g.allowedGroups == nil || !g.allowedGroups[it.GroupOpenID] {
-				g.logger.Printf("[gateway] ignoring group interaction (not allowlisted)")
-				return
-			}
-		default:
-			g.logger.Printf("[gateway] ignoring channel interaction (restricted mode)")
-			return
-		}
-	}
-	// Always ACK promptly.
-	if err := g.client.AckInteraction(ctx, it.ID, qq.InteractionACKSuccess); err != nil {
-		g.logger.Printf("[gateway] ack interaction: %v", err)
-	}
-	prompt := it.Data.Resolved.ButtonData
-	if prompt == "" {
-		return
-	}
-	var r *responder
-	switch it.ChatType {
-	case qq.InteractionChatTypeGroup:
-		r = &responder{client: g.client, kind: kindGroup, groupOpenID: it.GroupOpenID, eventID: it.ID, asMarkdown: g.cfg.ReplyAsMarkdown}
-	case qq.InteractionChatTypeC2C:
-		r = &responder{client: g.client, kind: kindC2C, userOpenID: it.UserOpenID, eventID: it.ID, asMarkdown: g.cfg.ReplyAsMarkdown}
-	default:
-		r = &responder{client: g.client, kind: kindChannel, channelID: it.ChannelID, eventID: it.ID, asMarkdown: g.cfg.ReplyAsMarkdown}
-	}
-	g.dispatch(ctx, r, prompt, nil)
 }
 
 // dispatch handles slash-commands inline and otherwise runs a Claude turn in a
@@ -340,7 +209,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		_ = r.Send(ctx, g.statusText(key))
 	case "whoami":
 		_ = r.Send(ctx, "**🪪 你的身份**\n"+r.identity()+
-			"\n\n把对应的 open_id 填入配置的 `allowed_users` / `allowed_groups` 即可锁定操作者。")
+			"\n\n把这个 open_id 填入配置的 `allowed_users` 即可锁定操作者。")
 	case "version":
 		_ = r.Send(ctx, fmt.Sprintf("**🏷️ 版本** cc-qq-gateway v%s · 运行 %s", Version, g.uptime()))
 	case "ping":
@@ -822,8 +691,8 @@ func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) {
 	}
 
 	if text != "" && len(chunks) > textBudget {
-		// Too long to fit: deliver the full text as a file when we can upload.
-		if g.cfg.LongRepliesAsFile() && r.supportsUpload() {
+		// Too long to fit: deliver the full text as a file (C2C always supports upload).
+		if g.cfg.LongRepliesAsFile() {
 			if path, err := g.writeReplyFile(key, text); err == nil {
 				media = append([]mediaItem{{kind: qq.FileTypeFile, path: path}}, media...)
 				head := truncateRunes(text, g.cfg.MaxReplyChars-48)

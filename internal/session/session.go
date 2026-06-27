@@ -10,16 +10,13 @@ import (
 
 // Session holds the Claude session id and bookkeeping for one conversation.
 type Session struct {
-	// Key uniquely identifies the conversation (e.g. "group:<openid>").
+	// Key uniquely identifies the conversation (e.g. "c2c:<openid>").
 	Key string
 	// ClaudeSessionID is the resumable Claude Code session id (empty until the
 	// first turn completes).
 	ClaudeSessionID string
 	// LastActive is the time of the last interaction.
 	LastActive time.Time
-	// MsgSeq is the per-conversation reply sequence counter for QQ group/C2C
-	// passive replies.
-	MsgSeq int
 	// Model, WorkDir and Mode override the gateway defaults for this conversation
 	// only, driven by /model, /dir and /mode. Empty means "use default".
 	Model   string
@@ -125,7 +122,7 @@ func (s *Session) Running() bool {
 }
 
 // The per-conversation override fields (Model/WorkDir/Mode) and the Claude
-// session bookkeeping (ClaudeSessionID/Turns/MsgSeq) are mutated by control
+// session bookkeeping (ClaudeSessionID/Turns) are mutated by control
 // commands (/model, /dir, /mode, /new) and the idle-reset path WHILE a turn is
 // concurrently reading them under mu. They are therefore guarded by ctrl (the
 // same lock /stop uses), so a command can update them while mu is held by a turn
@@ -164,12 +161,11 @@ func (s *Session) HasSession() bool {
 	return s.ClaudeSessionID != ""
 }
 
-// ClearClaude clears the resumable session id (and the reply seq), starting a
-// fresh Claude conversation on the next turn.
+// ClearClaude clears the resumable session id, starting a fresh Claude
+// conversation on the next turn.
 func (s *Session) ClearClaude() {
 	s.ctrl.Lock()
 	s.ClaudeSessionID = ""
-	s.MsgSeq = 0
 	s.ctrl.Unlock()
 }
 

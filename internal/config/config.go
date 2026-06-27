@@ -60,9 +60,9 @@ type GatewayConfig struct {
 	ReplyAsMarkdown bool `toml:"reply_as_markdown"`
 	// ThinkingMessage is sent immediately on receipt to acknowledge the user.
 	ThinkingMessage string `toml:"thinking_message"`
-	// AllowedGroups / AllowedUsers, if set, restrict who may talk to the bot.
-	AllowedGroups []string `toml:"allowed_groups"`
-	AllowedUsers  []string `toml:"allowed_users"`
+	// AllowedUsers, if set, restricts the bot to these C2C (single-chat) user
+	// open_ids. Empty serves any user. (Legacy allowed_groups keys are ignored.)
+	AllowedUsers []string `toml:"allowed_users"`
 	// MediaDir is where inbound attachments are downloaded and outbound files are
 	// staged. Default: <home>/.cc-qq/media.
 	MediaDir string `toml:"media_dir"`

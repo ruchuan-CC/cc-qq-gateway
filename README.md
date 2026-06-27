@@ -1,14 +1,15 @@
 # cc-qq-gateway
 
 A gateway that connects your **local Claude Code** to a **QQ Bot** for
-conversational dialogue. Inspired by [`chenhg5/cc-connect`](https://github.com/chenhg5/cc-connect),
-this is a focused, single-platform (QQ) implementation written in Go that
-implements the full QQ Bot OpenAPI **v2** surface.
+single-chat (private) conversational dialogue. Inspired by
+[`chenhg5/cc-connect`](https://github.com/chenhg5/cc-connect), this is a focused,
+single-platform (QQ) implementation written in Go.
 
-Send a message to your QQ bot — in a group, a private (C2C) chat, a guild
-channel, or a guild direct message — and the gateway runs a Claude Code turn on
-your machine and replies with the result, keeping conversational context per
-chat.
+Send a message to your QQ bot in a **private (C2C) chat** and the gateway runs a
+Claude Code turn on your machine and replies with the result, keeping
+conversational context. This gateway is **single-chat only** — group, guild
+channel, guild DM and button-interaction surfaces are intentionally not
+implemented.
 
 ```
 QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-gateway ──▶ claude (local) 
@@ -26,14 +27,11 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
   - **Webhook** — QQ pushes events to your HTTPS endpoint. Implements the
     Ed25519 **URL-validation challenge** (op 13) and **signature verification**
     of every push, with the key derived from your bot secret exactly per spec.
-- **Conversational sessions** — one resumable Claude Code session per QQ
-  conversation, with idle-reset and in-order, non-overlapping turns.
-- **All four message surfaces** — group (`GROUP_AT_MESSAGE_CREATE`), single chat
-  (`C2C_MESSAGE_CREATE`), guild channel (`AT_MESSAGE_CREATE`/`MESSAGE_CREATE`)
-  and guild direct messages (`DIRECT_MESSAGE_CREATE`). Passive replies use the
-  inbound `msg_id`/`event_id` with the required, auto-incrementing `msg_seq`.
-- **Button interactions** — `INTERACTION_CREATE` is acknowledged promptly and
-  the button data is fed back into the conversation.
+- **Conversational sessions** — one resumable Claude Code session for the
+  single-chat conversation, with idle-reset and in-order, non-overlapping turns.
+- **Single-chat (C2C) messages** — handles `C2C_MESSAGE_CREATE` only. Passive
+  replies use the inbound `msg_id`/`event_id` with the required, auto-incrementing
+  `msg_seq`.
 - **Rich built-in commands (cc-connect style)** — `/help`, `/reset`, `/status`,
   `/sessions`, `/model`, `/cwd`, `/stop`, `/whoami`, `/ping`, `/version`, each
   with English and Chinese aliases. See [Commands](#commands).
@@ -46,8 +44,8 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
   do anything on the host. See [Full authority](#full-authority).
 - **Long-reply handling** — replies are split on line boundaries and capped to
   the QQ message-length and 5-passive-reply limits.
-- **Complete API client** — every documented v2 endpoint is implemented (see
-  [API coverage](#api-coverage)), so the gateway is also a usable Go SDK.
+- **Focused C2C client** — implements exactly the v2 endpoints single-chat
+  dialogue needs (see [API coverage](#api-coverage)); nothing more.
 
 ## Quick start
 
@@ -88,12 +86,12 @@ documentation. Key choices:
 | Setting | Meaning |
 | --- | --- |
 | `qq.transport` | `"websocket"` (no public IP) or `"webhook"` (public HTTPS). |
-| `qq.intents` | Which event groups to subscribe to (WebSocket). |
+| `qq.intents` | Event subscription (WebSocket). Single-chat needs only `GROUP_AND_C2C_EVENT`. |
 | `claude.work_dir` | The project directory Claude Code operates in. |
 | `claude.permission_mode` / `claude.dangerously_skip_permissions` | How tool permissions are handled in non-interactive turns. For autonomous dev tasks set `dangerously_skip_permissions = true`; for chat-only, leave defaults. |
 | `gateway.session_idle_minutes` | Auto-reset a conversation after inactivity. |
 | `gateway.reply_as_markdown` | Send replies as markdown (needs the capability enabled on your bot). |
-| `gateway.allowed_groups` / `allowed_users` | Optional allowlists. |
+| `gateway.allowed_users` | Optional C2C allowlist (user open_ids). Empty = any user. |
 
 ### WebSocket vs Webhook
 
@@ -191,25 +189,15 @@ By design, "the whole server is Claude's home." The bundled `config.toml` sets:
   over the host.
 
 This is intentionally powerful: anyone who can message the bot can run anything on
-the machine. **Lock it down** with `gateway.allowed_users` / `allowed_groups`
-(use `/whoami` to get your id), and/or tighten `allowed_tools` / `permission_mode`
-for a more restricted deployment.
+the machine. **Lock it down** with `gateway.allowed_users` (use `/whoami` to get
+your id), and/or tighten `allowed_tools` / `permission_mode` for a more restricted
+deployment.
 
 ### Restricted mode
 
-As soon as `allowed_users` **or** `allowed_groups` is non-empty, the gateway runs
-in **restricted mode**:
-
-- **C2C (private chat)** — served only for user open_ids in `allowed_users`.
-- **Groups** — served only for group open_ids in `allowed_groups` (empty ⇒ no
-  groups are served).
-- **Guild channels and guild DMs** — ignored entirely. These surfaces have no
-  per-user allowlist, so leaving them open would defeat "lock to my id".
-- **Button interactions** — gated the same way, so callbacks can't bypass the
-  allowlist.
-
-This closes the gap where the channel/DM surfaces would otherwise stay open to
-anyone even after you set a user allowlist.
+As soon as `allowed_users` is non-empty, the gateway serves **only** those C2C
+(single-chat) user open_ids and ignores messages from anyone else. Since this is a
+single-chat-only gateway, there are no other surfaces to gate.
 
 ## Run as a service (always-on)
 
@@ -266,8 +254,8 @@ every capability is available, with no artificial restrictions:
   @@QQ_VIDEO: https://example.com/clip.mp4
   @@QQ_AUDIO: /home/claude/voice.silk
   ```
-  Local paths are uploaded; `http(s)` URLs are passed through. (Guild channels/DMs
-  support image-by-URL only; groups and C2C support full upload.)
+  Local paths are uploaded; `http(s)` URLs are passed through (C2C supports full
+  rich-media upload).
 - **No truncation.** Replies too long for QQ's 5-message passive-reply budget are
   delivered in full as an uploaded `.md` file (toggle with
   `send_long_replies_as_file`).
@@ -294,15 +282,14 @@ cmd/cc-qq-gateway/      CLI entrypoint
 internal/
   app/                  wiring + transport selection (the "daemon")
   config/               TOML config loading & validation
-  qq/                   QQ Bot OpenAPI v2 client + WS/Webhook transports
-    types.go            data models
-    intents.go          gateway intents
+  qq/                   QQ Bot OpenAPI v2 client (single-chat) + WS/Webhook
+    types.go            C2C data models
+    intents.go          gateway intent (GROUP_AND_C2C_EVENT)
     events.go           event names, opcodes, payload types
     token.go            access-token manager (auto-refresh)
     client.go           authenticated HTTP core
-    message.go          send / rich-media / recall
-    guild.go            guild/channel/member/role/mute/announce/pins/
-                        schedule/reaction/audio/permission/interaction/gateway
+    message.go          C2C send + rich-media upload
+    bot.go              GET /users/@me + GET /gateway/bot
     ws.go               WebSocket transport (identify/heartbeat/resume)
     webhook.go          Webhook transport (Ed25519 validate + verify)
   claude/               local Claude Code CLI bridge
@@ -312,31 +299,18 @@ internal/
 
 ## API coverage
 
-The `internal/qq` package implements the documented QQ Bot **v2** endpoints:
+This is a **single-chat (C2C) only** gateway. The `internal/qq` package implements
+just the endpoints that private dialogue needs:
 
-- **Auth & gateway**: `getAppAccessToken` (auto-refresh), `GET /gateway`,
-  `GET /gateway/bot`.
-- **Messages — send**: group, C2C, channel, and guild DM (incl. `CreateDMS`).
-- **Messages — rich media**: group/C2C file upload (image/video/audio/file).
-- **Messages — recall**: channel, DM, group, C2C.
-- **Message types**: text, markdown (native & template), ark (23/24/37), embed,
-  inline keyboards (template id & custom buttons).
-- **Interactions**: `INTERACTION_CREATE` handling + ACK (`PUT /interactions/{id}`).
-- **Guild**: get guild, current bot user, bot guild list.
-- **Channel**: list/get/create/modify/delete; member & role channel permissions.
-- **Members**: list, get, kick.
-- **Roles**: list/create/modify/delete; add/remove role member.
-- **Mute**: guild-wide, single member, multiple members.
-- **Announcements**: guild & (deprecated) channel announce create/delete.
-- **Pins (精华)**: add/remove/list.
-- **Schedules (日程)**: list/get/create/modify/delete.
-- **Reactions (表情表态)**: add/remove/list users.
-- **Audio/Mic**: control audio, mic on/off.
-- **API permissions**: list, demand authorization link.
+- **Auth & gateway**: `getAppAccessToken` (auto-refresh), `GET /gateway/bot`,
+  `GET /users/@me`.
+- **Messages — send**: C2C (`POST /v2/users/{openid}/messages`).
+- **Messages — rich media**: C2C file upload (image/video/audio/file).
+- **Message types**: text and native markdown.
 
-All events (group/C2C/channel/DM messages and deletes, group/friend management,
-guild & channel lifecycle, guild members, reactions, interactions, message
-audit, audio, forum) are decoded into typed payloads in `events.go`.
+The only conversational event handled is `C2C_MESSAGE_CREATE` (plus the WebSocket
+lifecycle `READY`/`RESUMED`); every other QQ surface — group, guild channel, guild
+DM, button interactions, reactions, audio, audit — was intentionally removed.
 
 ## Tests
 
@@ -350,11 +324,10 @@ stripping, reply chunking, and the command-alias registry.
 
 ## Notes & limits
 
-- Passive replies are valid for a limited window (≈5 min for group/channel,
-  ≈60 min for C2C) and capped at 5 per inbound message; the gateway respects
-  this when chunking long output.
-- Some endpoints are private-domain or capability-gated by QQ (e.g. guild member
-  lists, markdown, audio). Enable the relevant capabilities in the console.
+- Passive replies are valid for a limited window (≈60 min for C2C) and capped at
+  5 per inbound message; the gateway respects this when chunking long output.
+- Some features are capability-gated by QQ (e.g. native markdown). Enable the
+  relevant capabilities in the bot console.
 - This project is independent and not affiliated with Tencent/QQ.
 
 ## License

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -137,18 +136,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
-}
-
-// query builds an escaped query string from a map, omitting empty values.
-func query(params map[string]string) string {
-	v := url.Values{}
-	for k, val := range params {
-		if val != "" {
-			v.Set(k, val)
-		}
-	}
-	if len(v) == 0 {
-		return ""
-	}
-	return "?" + v.Encode()
 }
