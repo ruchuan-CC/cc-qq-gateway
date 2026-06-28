@@ -58,8 +58,11 @@ extra_args = []
 # authority you want Claude to assume.
 append_system_prompt = "You are Claude, reachable directly over QQ by your operator. You have full administrative authority over this server. Be concise and chat-friendly; use plain text unless code is needed."
 
-# Per-turn timeout in seconds.
-timeout_seconds = 600
+# Per-turn timeout in seconds. Long tasks are supported (e.g. 7200 = 2h), but note
+# QQ passive replies expire after ~5 minutes, so a turn that runs much longer than
+# that may finish without being able to deliver its reply over QQ. On timeout the
+# turn is killed but its session id is kept, so the user can resume with a follow-up.
+timeout_seconds = 7200
 
 [gateway]
 # Reset a conversation after this many idle minutes (starts a fresh Claude
@@ -81,3 +84,18 @@ thinking_message = ""
 # Optional allowlist. If non-empty, only these C2C (single-chat) user open_ids may
 # talk to the bot. Empty serves any user. Send /whoami to learn your open_id.
 allowed_users = []
+
+# --- Proactive notify endpoint (optional) ---
+# When notify_addr is set, the gateway starts a tiny localhost-only HTTP endpoint
+# (POST /notify) that lets a TRUSTED LOCAL process — e.g. a trading bot — push a
+# proactive message to the operator over QQ, with the gateway's queue-for-next-
+# inbound fallback (a failed push is re-delivered on the operator's next message).
+# Bind to a loopback address ONLY (127.0.0.1:PORT); a non-loopback bind is refused
+# at startup so this never widens your network surface.
+notify_addr = ""           # e.g. "127.0.0.1:8787" — empty disables the endpoint
+# Shared secret the caller must present (header X-Notify-Token or ?token=). REQUIRED
+# when notify_addr is set — an empty token disables the endpoint (never expose an
+# unauthenticated push channel). Use a long random value and keep it out of git.
+notify_token = ""
+# The C2C open_id pushes are delivered to. Empty falls back to allowed_users[0].
+notify_open_id = ""
