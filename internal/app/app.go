@@ -70,6 +70,13 @@ func (a *App) Run(ctx context.Context) error {
 	// Verify credentials early (best-effort, retried) so startup is observable.
 	a.awaitIdentity(ctx)
 
+	// Start the localhost notify endpoint (if configured) once for the whole
+	// process lifetime — it pushes proactive operator messages (e.g. trade close
+	// reports) independently of the transport restart loop below.
+	if ns := a.gw.NewNotifyServer(); ns != nil {
+		go ns.Run(ctx)
+	}
+
 	const (
 		minDelay = 2 * time.Second
 		maxDelay = 30 * time.Second

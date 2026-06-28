@@ -69,6 +69,19 @@ type GatewayConfig struct {
 	// SendLongRepliesAsFile, when true (default), delivers replies that exceed the
 	// passive-reply budget as an uploaded file instead of truncating them.
 	SendLongRepliesAsFile *bool `toml:"send_long_replies_as_file"`
+
+	// NotifyAddr, when set, starts a localhost-only HTTP endpoint that lets trusted
+	// local processes (e.g. the trading bot) push a proactive message to the operator
+	// over QQ. Bind to a loopback address only (e.g. "127.0.0.1:8787"); a non-loopback
+	// bind is refused at startup. Empty disables the endpoint.
+	NotifyAddr string `toml:"notify_addr"`
+	// NotifyToken is the shared secret a caller must present (header X-Notify-Token or
+	// ?token=) to push. Required when NotifyAddr is set — an empty token disables the
+	// endpoint even if an address is configured (never expose an unauthenticated push).
+	NotifyToken string `toml:"notify_token"`
+	// NotifyOpenID is the C2C open_id that pushes are delivered to. Empty falls back to
+	// the first entry of AllowedUsers (the locked operator).
+	NotifyOpenID string `toml:"notify_open_id"`
 }
 
 // Load reads and validates a TOML config file.

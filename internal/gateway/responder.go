@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
@@ -25,10 +26,22 @@ type responder struct {
 	userOpenID string
 	msgID      string // inbound message id, for passive replies
 
-	seq int // passive-reply sequence
+	sendMu sync.Mutex // serializes sends so seq stays monotonic under concurrency
+	seq    int        // passive-reply sequence
+
+	// active, once set, switches sends from passive replies (bound to msgID, which
+	// QQ expires after ~5 minutes) to active pushes (msgID omitted). Used to deliver
+	// the result of a turn that outran the passive-reply window.
+	active atomic.Bool
 
 	asMarkdown bool
 }
+
+// GoActive switches this responder to active-push mode for all subsequent sends.
+func (r *responder) GoActive() { r.active.Store(true) }
+
+// Active reports whether the responder is in active-push mode.
+func (r *responder) Active() bool { return r.active.Load() }
 
 // conversationKey returns the stable per-conversation key for session tracking.
 func (r *responder) conversationKey() string {
@@ -43,6 +56,9 @@ func (r *responder) identity() string {
 
 // Send delivers a single message chunk to the user. When markdown is requested it
 // is attempted first; if the API rejects it the chunk is retried as plain text.
+// A final failure is logged with the QQ error code: many callers fire-and-forget
+// (`_ = r.Send(...)`), so without this a rejected reply (rate limit, expired
+// passive window, permission) would vanish with no trace.
 func (r *responder) Send(ctx context.Context, text string) error {
 	useMarkdown := r.asMarkdown && !markdownDisabled.Load()
 	err := r.sendOnce(ctx, text, useMarkdown)
@@ -58,15 +74,24 @@ func (r *responder) Send(ctx context.Context, text string) error {
 		} else {
 			log.Printf("[gateway] markdown send failed transiently (%v); retrying as text (markdown stays enabled)", err)
 		}
-		return r.sendOnce(ctx, text, false)
+		err = r.sendOnce(ctx, text, false)
+	}
+	if err != nil {
+		log.Printf("[gateway] C2C send FAILED (active=%t) to open_id=%s: %v", r.active.Load(), r.userOpenID, err)
 	}
 	return err
 }
 
 // sendOnce performs exactly one C2C send in the requested format.
 func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) error {
+	r.sendMu.Lock()
 	r.seq++
-	req := &qq.MessageRequest{MsgID: r.msgID, MsgSeq: r.seq}
+	seq := r.seq
+	r.sendMu.Unlock()
+	req := &qq.MessageRequest{MsgSeq: seq}
+	if !r.active.Load() {
+		req.MsgID = r.msgID // passive reply; active pushes omit msg_id
+	}
 	applyContent(req, text, asMarkdown)
 	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
 	return err
@@ -89,11 +114,17 @@ func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url 
 	if err != nil {
 		return fmt.Errorf("upload media: %w", err)
 	}
+	r.sendMu.Lock()
 	r.seq++
+	seq := r.seq
+	r.sendMu.Unlock()
 	req := &qq.MessageRequest{
 		MsgType: qq.MsgTypeMedia,
 		Media:   &qq.MessageMedia{FileInfo: info.FileInfo},
-		MsgID:   r.msgID, MsgSeq: r.seq,
+		MsgSeq:  seq,
+	}
+	if !r.active.Load() {
+		req.MsgID = r.msgID
 	}
 	_, err = r.client.SendC2CMessage(ctx, r.userOpenID, req)
 	return err

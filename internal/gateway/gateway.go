@@ -121,6 +121,11 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, text string, atts 
 	key := r.conversationKey()
 	g.logger.Printf("[gateway] inbound %s — %s (attachments=%d)", key, r.identity(), len(atts))
 
+	// This inbound message opens a fresh passive-reply window, so flush any replies
+	// that a long-running turn couldn't deliver earlier (the next-message fallback
+	// that guarantees a result is never lost, even without active-push permission).
+	g.flushPending(ctx, r, key)
+
 	if handled := g.handleCommand(ctx, r, key, text); handled {
 		return
 	}
@@ -128,6 +133,21 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, text string, atts 
 	// Detach from the request context so a webhook response (which cancels its
 	// context on return) doesn't kill the in-flight turn.
 	go g.runTurn(context.Background(), r, key, text, atts)
+}
+
+// flushPending delivers any replies queued from an earlier turn that outran the
+// passive-reply window. Delivered as passive replies to the current message, which
+// has a fresh window. Sent best-effort; a delivery failure re-queues nothing (the
+// next message will retry whatever this call leaves behind via re-queue below).
+func (g *Gateway) flushPending(ctx context.Context, r *responder, key string) {
+	pending := g.sessions.Get(key).TakePending()
+	for _, p := range pending {
+		if err := g.deliver(ctx, r, key, "⏮️ 稍早那条任务的结果：\n\n"+p); err != nil {
+			g.logger.Printf("[gateway] [%s] re-queueing pending reply (flush failed: %v)", key, err)
+			g.sessions.Get(key).QueuePending(p)
+			return
+		}
+	}
 }
 
 // handleCommand processes built-in control commands. A command is any message
@@ -500,6 +520,9 @@ func (g *Gateway) statusText(key string) string {
 	if s.Running() {
 		running = "运行中"
 	}
+	if d := s.RunningFor(); d > 0 {
+		running = "运行中 · 已跑 " + d.Round(time.Second).String()
+	}
 	return fmt.Sprintf(
 		"**📊 运行状态**\n"+
 			"**会话** %s\n"+
@@ -589,16 +612,31 @@ const helpText = "**🤖 Claude Code · QQ** —— 直接说需求即可，命�
 	"| /cost | 上次花费 | /init | 生成 CLAUDE.md |\n" +
 	"| /status | 运行状态 | /sessions | 活跃会话 |\n" +
 	"| /whoami | 我的 open_id | /version | 版本信息 |\n" +
-	"| /help | 显示帮助 | | |"
+	"| /help | 显示帮助 | /ping | 连通测试 |"
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message.
 const maxPassiveReplies = 5
+
+// longTurnNotice is how long a turn runs before the gateway sends a single
+// "still working" reassurance. Kept well inside QQ's passive-reply window.
+const longTurnNotice = 90 * time.Second
+
+// passiveWindow is the conservative cutoff (under QQ's ~5-minute passive-reply
+// expiry) past which a turn's result is delivered by active push instead of a
+// passive reply, falling back to the next-message pending queue.
+const passiveWindow = 4 * time.Minute
 
 // runTurn executes one Claude Code turn for a conversation and sends the reply,
 // including any inbound attachments (downloaded for Claude to read) and any
 // outbound media Claude asks to send.
 func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, atts []qq.MessageAttachment) {
 	sess := g.sessions.Get(key)
+	// Messages for one conversation are serialized by sess.Lock(); a message that
+	// arrives while a turn is in flight waits here. Tell the user it is queued so the
+	// wait doesn't look like a dropped message or a crash.
+	if sess.Running() {
+		_ = r.Send(ctx, "⏳ 上一条还在跑，这条先排队了，等它跑完我马上接着处理。")
+	}
 	sess.Lock()
 	defer sess.Unlock()
 
@@ -609,6 +647,15 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		sess.EndTurn()
 		cancel()
 	}()
+
+	// QQ passive replies are capped (5 per inbound message, ~5-minute window), so we
+	// can't truly heartbeat a long task. Send a single reassurance once a turn has
+	// clearly become long-running, so it doesn't look dead. One-shot; Stop() cancels
+	// it if the turn finishes first.
+	ping := time.AfterFunc(longTurnNotice, func() {
+		_ = r.Send(context.Background(), "🟡 还在干活，这条任务比较久，跑完我会把结果发来，稍等。")
+	})
+	defer ping.Stop()
 
 	// Apply a pending /think request, then download any attachments so Claude
 	// can read them as local files.
@@ -628,27 +675,41 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 
 	resuming := sess.GetSessionID()
 	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, resuming != "")
+	started := time.Now()
 	res, err := g.bridge.Run(turnCtx, claude.Request{
 		SessionID:      resuming,
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
 		WorkDir:        sess.GetWorkDir(),
 		PermissionMode: sess.GetMode(),
+		OnActivity: func(tool string) {
+			g.logger.Printf("[gateway] [%s] tool: %s", key, tool)
+		},
 	})
+	// A turn that ran past the passive window can no longer be answered with a
+	// passive reply; its result must be pushed actively or queued for next time.
+	longTurn := time.Since(started) > passiveWindow
 	if err != nil {
 		if turnCtx.Err() == context.Canceled {
 			g.logger.Printf("[gateway] [%s] turn cancelled", key)
 			return
 		}
-		// A hard failure (process error / timeout / an unresumable session id). If we
-		// were resuming, the stored id may be stale — clear it so the NEXT message
-		// starts a fresh conversation instead of re-failing forever on a bad --resume.
-		if resuming != "" {
+		// A killed/failed turn may still have reported a session id mid-stream. Keep it
+		// so the conversation can be resumed; only when we have none and were resuming
+		// do we clear the stored id (it was likely stale and would re-fail forever).
+		if res != nil && res.SessionID != "" {
+			sess.SetSessionID(res.SessionID)
+			g.logger.Printf("[gateway] [%s] kept session id after error for resume", key)
+		} else if resuming != "" {
 			sess.ClearClaude()
 			g.logger.Printf("[gateway] [%s] cleared possibly-stale session id after error", key)
 		}
 		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
-		_ = r.Send(ctx, "⚠️ 出错了 (Claude error): "+short(err.Error()))
+		if turnCtx.Err() == context.DeadlineExceeded {
+			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。", true)
+		} else {
+			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Claude error): "+short(err.Error()), longTurn)
+		}
 		return
 	}
 	// The CLI exits 0 even when the turn itself errored (e.g. a bad --model 404s, or an
@@ -660,7 +721,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		if strings.Contains(strings.ToLower(res.Text), "model") {
 			msg += "\n\n可能是模型设置问题，试试 `/model default` 恢复默认模型。"
 		}
-		_ = r.Send(ctx, msg)
+		g.deliverOrQueue(ctx, r, sess, key, msg, longTurn)
 		return
 	}
 	if res.SessionID != "" {
@@ -674,13 +735,46 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	if reply == "" {
 		reply = "(empty response)"
 	}
-	g.deliver(ctx, r, key, reply)
+	g.deliverOrQueue(ctx, r, sess, key, reply, longTurn)
+}
+
+// PushToOperator delivers a proactive (active-push) message to the configured
+// operator, used by the local notify endpoint (e.g. the trading bot's close
+// reports). It pushes actively from the start (there is no inbound message to
+// reply to); if the active push is unavailable (e.g. QQ active-message quota),
+// the text is queued on the operator's session and flushed on their next inbound
+// message — so a settlement notice is never silently lost. Returns nil once the
+// message is either delivered or safely queued.
+func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("empty notify text")
+	}
+	openID := strings.TrimSpace(g.cfg.NotifyOpenID)
+	if openID == "" && len(g.cfg.AllowedUsers) > 0 {
+		openID = g.cfg.AllowedUsers[0]
+	}
+	if openID == "" {
+		return fmt.Errorf("no notify target (set gateway.notify_open_id or allowed_users)")
+	}
+	r := &responder{client: g.client, userOpenID: openID, asMarkdown: g.cfg.ReplyAsMarkdown}
+	r.GoActive()
+	key := r.conversationKey()
+	if err := g.deliver(ctx, r, key, text); err != nil {
+		g.sessions.Get(key).QueuePending(text)
+		g.logger.Printf("[gateway] [%s] notify active push failed (%v); queued for next inbound", key, err)
+		return nil
+	}
+	g.logger.Printf("[gateway] [%s] notify delivered via active push", key)
+	return nil
 }
 
 // deliver sends Claude's reply: extracts outbound media directives, sends the
 // text (as a file when it is too long to fit the passive-reply budget), then
-// delivers each media item — all within QQ's 5-passive-reply cap.
-func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) {
+// delivers each media item — all within QQ's 5-passive-reply cap. It returns a
+// non-nil error if the text itself could not be sent (so the caller can fall back
+// to active push or queue it for next time); media failures are non-fatal.
+func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) error {
 	text, media := extractSendDirectives(text)
 
 	budget := maxPassiveReplies
@@ -714,7 +808,7 @@ func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) {
 			}
 			if err := r.Send(ctx, c); err != nil {
 				g.logger.Printf("[gateway] send reply chunk: %v", err)
-				return
+				return err
 			}
 			sent++
 		}
@@ -737,6 +831,34 @@ func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) {
 		}
 		sent++
 	}
+	return nil
+}
+
+// deliverOrQueue delivers a reply that may have outrun QQ's passive-reply window.
+// If preferActive is set (the turn ran long) it pushes actively from the start;
+// otherwise it sends passively and, on failure, escalates to an active push before
+// finally queueing the text on the session for delivery on the next inbound
+// message. Either path guarantees the reply is not silently lost.
+func (g *Gateway) deliverOrQueue(ctx context.Context, r *responder, sess *session.Session, key, text string, preferActive bool) {
+	if preferActive {
+		r.GoActive()
+	}
+	err := g.deliver(ctx, r, key, text)
+	if err == nil {
+		if r.Active() {
+			g.logger.Printf("[gateway] [%s] reply delivered via active push", key)
+		}
+		return
+	}
+	if !r.Active() {
+		g.logger.Printf("[gateway] [%s] passive delivery failed (%v); trying active push", key, err)
+		r.GoActive()
+		if err = g.deliver(ctx, r, key, text); err == nil {
+			return
+		}
+	}
+	sess.QueuePending(text)
+	g.logger.Printf("[gateway] [%s] active delivery unavailable (%v); queued reply for next inbound message", key, err)
 }
 
 // capChunks collapses chunks beyond max into the last allowed chunk so output

@@ -6,10 +6,12 @@
 package claude
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -104,6 +106,26 @@ type Request struct {
 	// PermissionMode overrides the configured permission handling for this turn:
 	// "default" | "plan" | "acceptEdits" | "bypass". Empty uses the config.
 	PermissionMode string
+	// OnActivity, when set, is called with a short label each time the turn makes
+	// visible progress (a tool starts). Used for server-side progress logging so a
+	// long-running turn can be observed instead of looking dead. Called from the
+	// goroutine driving Run; keep it cheap and non-blocking.
+	OnActivity func(label string)
+}
+
+// streamEvent is one newline-delimited object from `--output-format stream-json`.
+// It unions the fields we care about across the system/assistant/result event types.
+type streamEvent struct {
+	Type       string          `json:"type"`
+	Subtype    string          `json:"subtype"`
+	SessionID  string          `json:"session_id"`
+	IsError    bool            `json:"is_error"`
+	Result     string          `json:"result"`
+	Error      string          `json:"error"`
+	TotalCost  float64         `json:"total_cost_usd"`
+	NumTurns   int             `json:"num_turns"`
+	DurationMS int             `json:"duration_ms"`
+	Message    json.RawMessage `json:"message"`
 }
 
 // Run executes one turn. If req.SessionID is non-empty the conversation is
@@ -122,7 +144,11 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 		workDir = req.WorkDir
 	}
 
-	args := []string{"--print", "--output-format", "json"}
+	// Stream the turn as newline-delimited JSON events (--verbose is required by the
+	// CLI for stream-json in print mode). Streaming lets us (1) capture the session
+	// id as soon as it is reported so a turn killed by the timeout can still be
+	// resumed instead of vanishing, and (2) observe tool activity as it happens.
+	args := []string{"--print", "--output-format", "stream-json", "--verbose"}
 	if req.SessionID != "" {
 		args = append(args, "--resume", req.SessionID)
 	}
@@ -161,23 +187,118 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	// variadic flags like --add-dir greedily consume following args, which would
 	// otherwise swallow the prompt and make the CLI think no input was given.
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("claude stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		// Even on a non-zero exit the CLI may have emitted a JSON error object.
-		if r, perr := parseResult(stdout.Bytes()); perr == nil && r.Text != "" {
-			return r, nil
-		}
-		return nil, fmt.Errorf("claude run failed: %w (stderr: %s)", err, truncate(stderr.String(), 500))
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("claude start failed: %w (stderr: %s)", err, truncate(stderr.String(), 300))
 	}
 
-	r, err := parseResult(stdout.Bytes())
-	if err != nil {
-		return nil, fmt.Errorf("%w (stderr: %s)", err, truncate(stderr.String(), 300))
+	result, sessionID, fallback := consumeStream(stdoutPipe, req.OnActivity)
+	waitErr := cmd.Wait()
+
+	// A terminal result event is authoritative even if Wait later reports an error.
+	if result != nil {
+		if result.SessionID == "" {
+			result.SessionID = sessionID
+		}
+		return result, nil
 	}
-	return r, nil
+
+	// No result event: the process was killed (timeout/OOM/cancel) or produced an
+	// unexpected shape. Return whatever session id we saw so the caller can resume,
+	// alongside the error — callers must treat a non-nil Result on an error as a
+	// resumable remnant, not a successful turn.
+	if r, perr := parseResult(fallback); perr == nil && r.Text != "" {
+		if r.SessionID == "" {
+			r.SessionID = sessionID
+		}
+		return r, nil
+	}
+	remnant := &Result{SessionID: sessionID}
+	if waitErr != nil {
+		return remnant, fmt.Errorf("claude run failed: %w (stderr: %s)", waitErr, truncate(stderr.String(), 500))
+	}
+	return remnant, fmt.Errorf("claude produced no result (stderr: %s)", truncate(stderr.String(), 300))
+}
+
+// consumeStream reads newline-delimited stream-json events to completion. It
+// returns the terminal "result" event (nil if none arrived, e.g. the process was
+// killed mid-turn), the most recent session id seen, and any non-JSON lines as a
+// raw fallback. onActivity, when non-nil, is called for each tool a turn starts.
+func consumeStream(r io.Reader, onActivity func(string)) (*Result, string, []byte) {
+	var (
+		result    *Result
+		sessionID string
+		fallback  bytes.Buffer
+	)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // tool results can be large
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev streamEvent
+		if json.Unmarshal(line, &ev) != nil {
+			fallback.Write(line)
+			fallback.WriteByte('\n')
+			continue
+		}
+		if ev.SessionID != "" {
+			sessionID = ev.SessionID
+		}
+		switch ev.Type {
+		case "assistant":
+			if onActivity != nil {
+				for _, name := range toolNames(ev.Message) {
+					onActivity(name)
+				}
+			}
+		case "result":
+			text := ev.Result
+			if text == "" && ev.Error != "" {
+				text = ev.Error
+			}
+			result = &Result{
+				Text:       text,
+				SessionID:  ev.SessionID,
+				IsError:    ev.IsError,
+				CostUSD:    ev.TotalCost,
+				NumTurns:   ev.NumTurns,
+				DurationMS: ev.DurationMS,
+			}
+		}
+	}
+	return result, sessionID, fallback.Bytes()
+}
+
+// toolNames extracts the names of any tool_use blocks in an assistant message's
+// content, for progress logging. Unparseable or non-tool messages yield nothing.
+func toolNames(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m struct {
+		Content []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	var names []string
+	for _, c := range m.Content {
+		if c.Type == "tool_use" && c.Name != "" {
+			names = append(names, c.Name)
+		}
+	}
+	return names
 }
 
 // RunCLI runs a claude management subcommand (e.g. "mcp list", "agents --json")

@@ -35,10 +35,37 @@ type Session struct {
 	ctrl       sync.Mutex
 	cancel     context.CancelFunc
 	running    bool
+	startedAt  time.Time // when the in-flight turn began, for /status elapsed time
 	lastPrompt string  // last user message, for /retry
 	lastCost   float64 // last turn cost (USD), for /cost
 	lastDurMS  int     // last turn duration (ms), for /cost
 	thinkNext  bool    // next turn uses extended thinking, set by /think
+
+	// pending holds replies that could not be delivered live (e.g. a long turn
+	// finished after QQ's passive-reply window expired and active push was
+	// unavailable). They are flushed on the conversation's next inbound message,
+	// which opens a fresh passive-reply window. Guarded by ctrl.
+	pending []string
+}
+
+// QueuePending stores a reply that could not be delivered now, for delivery on
+// the next inbound message. Empty strings are ignored.
+func (s *Session) QueuePending(text string) {
+	if text == "" {
+		return
+	}
+	s.ctrl.Lock()
+	s.pending = append(s.pending, text)
+	s.ctrl.Unlock()
+}
+
+// TakePending returns and clears the queued replies.
+func (s *Session) TakePending() []string {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	p := s.pending
+	s.pending = nil
+	return p
 }
 
 // RecordTurn stores bookkeeping from a completed turn for /retry and /cost.
@@ -91,7 +118,18 @@ func (s *Session) BeginTurn(cancel context.CancelFunc) {
 	s.ctrl.Lock()
 	s.cancel = cancel
 	s.running = true
+	s.startedAt = time.Now()
 	s.ctrl.Unlock()
+}
+
+// RunningFor reports how long the in-flight turn has been running, or 0 if idle.
+func (s *Session) RunningFor() time.Duration {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	if !s.running {
+		return 0
+	}
+	return time.Since(s.startedAt)
 }
 
 // EndTurn clears the in-flight turn state.
