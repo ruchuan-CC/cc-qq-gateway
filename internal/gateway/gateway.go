@@ -600,17 +600,95 @@ var commandAliases = map[string]string{
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
-// helpText avoids Markdown pipe tables on purpose: QQ does not render them
-// reliably (the same reason ProtocolPrompt tells Claude to avoid them), so the
-// commands are laid out as compact bold-label lines that read cleanly whether the
-// bot has native-markdown approval or falls back to plain text.
-const helpText = "**🤖 Claude Code · QQ** —— 直接说需求即可，下列命令可选：\n\n" +
-	"**对话** /new 新对话 · /retry 重做上一条 · /stop 中断任务\n" +
-	"**配置** /model 模型 · /think 深度思考 · /dir 工作目录 · /mode 权限模式\n" +
-	"**Claude** /agents 子代理 · /mcp MCP · /memory 记忆 · /doctor 诊断\n" +
-	"**快捷** /review 代码评审 · /diff git 改动 · /explain 解释 · /web 联网 · /init 生成 CLAUDE.md\n" +
-	"**信息** /usage 用量 · /cost 上次花费 · /status 状态 · /sessions 会话 · /whoami 身份 · /version 版本 · /ping 连通\n\n" +
-	"中文别名也可用（如「新对话」「停止」「状态」），或 /help 再看一次。"
+// helpCommand is one row of the /help table.
+type helpCommand struct{ group, cmd, desc string }
+
+// helpCommands is the canonical command list rendered by /help, grouped by area.
+var helpCommands = []helpCommand{
+	{"对话", "/new", "开启新对话（清空上下文）"},
+	{"对话", "/retry", "重做上一条消息"},
+	{"对话", "/stop", "中断当前任务"},
+	{"配置", "/model", "查看 / 切换模型"},
+	{"配置", "/think", "下一条深度思考"},
+	{"配置", "/dir", "查看 / 切换工作目录"},
+	{"配置", "/mode", "权限模式"},
+	{"Claude", "/agents", "后台子代理"},
+	{"Claude", "/mcp", "MCP 服务器"},
+	{"Claude", "/memory", "查看记忆 CLAUDE.md"},
+	{"Claude", "/doctor", "环境诊断"},
+	{"快捷", "/review", "代码评审"},
+	{"快捷", "/diff", "查看 git 改动"},
+	{"快捷", "/explain", "解释代码 / 内容"},
+	{"快捷", "/web", "联网搜索"},
+	{"快捷", "/init", "生成 CLAUDE.md"},
+	{"信息", "/usage", "用量额度"},
+	{"信息", "/cost", "上次花费"},
+	{"信息", "/status", "运行状态"},
+	{"信息", "/sessions", "活跃会话"},
+	{"信息", "/whoami", "我的 open_id"},
+	{"信息", "/version", "版本信息"},
+	{"信息", "/ping", "连通测试"},
+	{"信息", "/help", "显示本帮助"},
+}
+
+// helpText is the rendered /help message: a Markdown intro plus a monospace,
+// box-drawn command table inside a fenced code block. QQ does NOT render GFM pipe
+// tables, but it does render code blocks in a monospace font, so an aligned ASCII
+// table is the layout that actually looks like a table on QQ (and degrades to
+// still-readable framed text if markdown falls back to plain). Columns are padded
+// by display width (CJK = 2 cells) so Chinese and ASCII line up. Built once.
+var helpText = buildHelpText()
+
+func buildHelpText() string {
+	const (
+		hGroup = "类别"
+		hCmd   = "命令"
+		hDesc  = "说明"
+	)
+	wGroup, wCmd, wDesc := displayWidth(hGroup), displayWidth(hCmd), displayWidth(hDesc)
+	for _, c := range helpCommands {
+		if w := displayWidth(c.group); w > wGroup {
+			wGroup = w
+		}
+		if w := displayWidth(c.cmd); w > wCmd {
+			wCmd = w
+		}
+		if w := displayWidth(c.desc); w > wDesc {
+			wDesc = w
+		}
+	}
+
+	rule := func(l, m, r string) string {
+		return l + strings.Repeat("─", wGroup+2) + m + strings.Repeat("─", wCmd+2) +
+			m + strings.Repeat("─", wDesc+2) + r
+	}
+	row := func(g, c, d string) string {
+		return "│ " + padDisplay(g, wGroup) + " │ " + padDisplay(c, wCmd) + " │ " + padDisplay(d, wDesc) + " │"
+	}
+
+	var b strings.Builder
+	b.WriteString("**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n```\n")
+	b.WriteString(rule("┌", "┬", "┐") + "\n")
+	b.WriteString(row(hGroup, hCmd, hDesc) + "\n")
+	b.WriteString(rule("├", "┼", "┤") + "\n")
+	prev := ""
+	for i, c := range helpCommands {
+		// A blank line between groups makes the table scannable; show the group
+		// label only on its first row.
+		if i > 0 && c.group != prev {
+			b.WriteString(rule("├", "┼", "┤") + "\n")
+		}
+		label := c.group
+		if c.group == prev {
+			label = ""
+		}
+		b.WriteString(row(label, c.cmd, c.desc) + "\n")
+		prev = c.group
+	}
+	b.WriteString(rule("└", "┴", "┘") + "\n```\n")
+	b.WriteString("中文别名也可用（如「新对话」「停止」「状态」「联网」）。")
+	return b.String()
+}
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message.
 const maxPassiveReplies = 5

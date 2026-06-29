@@ -85,6 +85,42 @@ func truncateRunes(s string, maxRunes int) string {
 
 func runeLen(s string) int { return len([]rune(s)) }
 
+// runeWidth returns a rune's monospace display width: 2 for CJK / fullwidth
+// glyphs (which occupy two cells in a monospace font, as QQ renders code blocks),
+// 1 otherwise. A wcwidth-style approximation, sufficient for Chinese + ASCII.
+func runeWidth(r rune) int {
+	if r >= 0x1100 && (r <= 0x115F || // Hangul Jamo
+		r == 0x2329 || r == 0x232A ||
+		(r >= 0x2E80 && r <= 0xA4CF && r != 0x303F) || // CJK..Yi
+		(r >= 0xAC00 && r <= 0xD7A3) || // Hangul syllables
+		(r >= 0xF900 && r <= 0xFAFF) || // CJK compatibility ideographs
+		(r >= 0xFE30 && r <= 0xFE4F) || // CJK compatibility forms
+		(r >= 0xFF00 && r <= 0xFF60) || // fullwidth forms
+		(r >= 0xFFE0 && r <= 0xFFE6) ||
+		(r >= 0x20000 && r <= 0x3FFFD)) {
+		return 2
+	}
+	return 1
+}
+
+// displayWidth is the total monospace display width of s.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// padDisplay right-pads s with spaces to a target monospace display width so
+// columns of mixed Chinese/ASCII text line up in a code block.
+func padDisplay(s string, width int) string {
+	if pad := width - displayWidth(s); pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
 func short(s string) string {
 	s = strings.TrimSpace(s)
 	if runeLen(s) <= 120 {
