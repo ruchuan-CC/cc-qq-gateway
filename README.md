@@ -29,13 +29,21 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
     of every push, with the key derived from your bot secret exactly per spec.
 - **Conversational sessions** — one resumable Claude Code session for the
   single-chat conversation, with idle-reset and in-order, non-overlapping turns.
-- **Single-chat (C2C) messages** — handles `C2C_MESSAGE_CREATE` only. Passive
-  replies use the inbound `msg_id` with a **per-conversation monotonic `msg_seq`**
-  shared across every reply, active push and notify message to that user, so a seq
-  is never reused (QQ rejects reuse with code `40054005`).
-- **Rich built-in commands (cc-connect style)** — `/help`, `/reset`, `/status`,
-  `/sessions`, `/model`, `/cwd`, `/stop`, `/whoami`, `/ping`, `/version`, each
-  with English and Chinese aliases. See [Commands](#commands).
+- **Single-chat (C2C) surface** — handles the C2C message plus the user/friend
+  lifecycle events (`FRIEND_ADD`, `FRIEND_DEL`, `C2C_MSG_RECEIVE`,
+  `C2C_MSG_REJECT`), all on the one `GROUP_AND_C2C_EVENT` (`1<<25`) intent. A new
+  friend / re-enabled push is greeted via a free `event_id` passive reply.
+- **Quota-aware delivery** — per the QQ docs a passive reply is valid for **60
+  minutes** (5 per inbound message) while active pushes are capped at **4 per
+  month**, so replies are always sent passively first and only fall back to a
+  single active push (then the next-message queue) if the window has truly
+  expired. Passive `msg_seq` is **per-conversation monotonic** (shared across
+  every reply / active push / notify to that user) so a seq is never reused — QQ
+  rejects reuse with code `40054005`.
+- **Rich built-in commands** — `/help`, `/status`, `/usage`, `/sessions`,
+  `/doctor` and more render as **aligned box tables** (QQ-safe: a monospace code
+  block, since QQ doesn't render Markdown pipe tables). English + Chinese aliases.
+  See [Commands](#commands).
 - **Always-online resilience** — a supervised, self-healing connection that
   reconnects forever, detects dead ("zombie") links with a heartbeat watchdog,
   recovers from panics, and resumes the gateway session across drops. See

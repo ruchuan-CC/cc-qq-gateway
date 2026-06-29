@@ -105,11 +105,60 @@ func (g *Gateway) HandleEvent(ctx context.Context, p *qq.Payload) {
 		}
 		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
 
+	case qq.EventFriendAdd, qq.EventC2CMsgReceive:
+		// User added the bot / re-enabled message push. Greet them — using the
+		// event_id so the welcome is a free passive reply (no scarce active-push
+		// quota). event_id is only carried over the webhook transport (p.ID); over
+		// WebSocket there is none, so we just log and skip rather than spend quota.
+		g.handleFriendEvent(ctx, p, true)
+	case qq.EventFriendDel, qq.EventC2CMsgReject:
+		// User removed the bot / turned off push. Nothing to send (and we mustn't);
+		// just record it.
+		g.handleFriendEvent(ctx, p, false)
 	case qq.EventReady, qq.EventResumed:
 		// WebSocket lifecycle — handled by the transport (session tracking); nothing to do here.
 	default:
 		// Single-chat only: every other QQ surface/event is ignored.
 		g.logger.Printf("[gateway] ignoring non-C2C event %s", p.Type)
+	}
+}
+
+// welcomeText greets a user who just added the bot / re-enabled push.
+const welcomeText = "**👋 你好，我是 Claude Code。**\n直接把需求发给我即可——写代码、查资料、读图片/文件都行。\n发送 **/help** 查看全部命令。"
+
+// handleFriendEvent records a single-chat user/friend lifecycle event and, when
+// greet is set and the transport provided an event_id (webhook only), sends a
+// free passive welcome. It never spends active-push quota and respects the
+// allow-list.
+func (g *Gateway) handleFriendEvent(ctx context.Context, p *qq.Payload, greet bool) {
+	var ev qq.C2CManageEvent
+	if err := json.Unmarshal(p.Data, &ev); err != nil {
+		g.logger.Printf("[gateway] decode %s event: %v", p.Type, err)
+		return
+	}
+	openID := ev.User()
+	g.logger.Printf("[gateway] %s — user open_id=%s", p.Type, openID)
+	if !greet || openID == "" {
+		return
+	}
+	if g.allowedUsers != nil && !g.allowedUsers[openID] {
+		return
+	}
+	if p.ID == "" {
+		// No event_id (WebSocket transport): a greeting would require an active push,
+		// which is capped at 4/month — not worth spending on a welcome. Skip silently.
+		return
+	}
+	sess := g.sessions.Get("c2c:" + openID)
+	r := &responder{
+		client:     g.client,
+		userOpenID: openID,
+		eventID:    p.ID,
+		asMarkdown: g.cfg.ReplyAsMarkdown,
+		nextSeq:    sess.NextSeq,
+	}
+	if err := r.Send(ctx, welcomeText); err != nil {
+		g.logger.Printf("[gateway] welcome send failed for %s: %v", openID, err)
 	}
 }
 
@@ -406,21 +455,24 @@ func (g *Gateway) cmdMemory(r *responder, key string) {
 func (g *Gateway) cmdDoctor(r *responder, key string) {
 	ver, _ := g.bridge.RunCLI(context.Background(), "--version")
 	plan := "未知"
-	auth := "❌"
+	// Keep cell values emoji-free: emoji width is renderer-dependent and would
+	// misalign the monospace table. Emoji live in the bold header outside the fence.
+	auth := "未认证"
 	if u, err := claude.FetchUsage(context.Background()); err == nil {
-		auth = "✅"
+		auth = "已认证"
 		if u.Plan != "" {
 			plan = prettyPlan(u.Plan)
 		}
 	}
-	txt := fmt.Sprintf(
-		"**🩺 环境诊断**\n"+
-			"Claude: %s\n"+
-			"订阅认证: %s %s\n"+
-			"网关: v%s · 运行 %s · 连接正常\n"+
-			"权限: %s",
-		strings.TrimSpace(ver), auth, plan, Version, g.uptime(), authorityLabel(g.bridge.FullAuthority()))
-	_ = r.Send(context.Background(), txt)
+	rows := [][]string{
+		{"Claude CLI", strings.TrimSpace(ver)},
+		{"订阅认证", auth},
+		{"订阅套餐", plan},
+		{"网关版本", "v" + Version},
+		{"运行时长", g.uptime()},
+		{"工具权限", authorityLabel(g.bridge.FullAuthority())},
+	}
+	_ = r.Send(context.Background(), "**🩺 环境诊断**\n\n"+renderTable([]string{"检查项", "结果"}, rows))
 }
 
 func authorityLabel(full bool) string {
@@ -436,32 +488,27 @@ func (g *Gateway) usageText() string {
 		turns, cost := g.usageSnapshot()
 		return fmt.Sprintf("**📊 用量**\n订阅用量获取失败：%s\n本网关累计 %d 轮 · $%.4f", short(err.Error()), turns, cost)
 	}
-	var b strings.Builder
-	b.WriteString("**📊 订阅用量**")
-	if u.Plan != "" {
-		b.WriteString(" · " + prettyPlan(u.Plan))
+	rows := make([][]string, 0, 4)
+	addWindow := func(label string, w claude.Window) {
+		if !w.Has {
+			return
+		}
+		reset := "—"
+		if !w.ResetsAt.IsZero() {
+			reset = fmt.Sprintf("%s后（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(cstZone).Format("01-02 15:04"))
+		}
+		rows = append(rows, []string{label, fmt.Sprintf("%.0f%%", w.Utilization), reset})
 	}
-	b.WriteString("\n")
-	b.WriteString(fmtWindow("5 小时窗口", u.FiveHour))
-	b.WriteString(fmtWindow("7 天窗口", u.SevenDay))
-	if u.Opus.Has {
-		b.WriteString(fmtWindow("7 天 · Opus", u.Opus))
-	}
-	if u.Sonnet.Has {
-		b.WriteString(fmtWindow("7 天 · Sonnet", u.Sonnet))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
+	addWindow("5 小时", u.FiveHour)
+	addWindow("7 天", u.SevenDay)
+	addWindow("7天·Opus", u.Opus)
+	addWindow("7天·Sonnet", u.Sonnet)
 
-func fmtWindow(label string, w claude.Window) string {
-	if !w.Has {
-		return ""
+	head := "**📊 订阅用量**"
+	if u.Plan != "" {
+		head += " · " + prettyPlan(u.Plan)
 	}
-	line := fmt.Sprintf("**%s** 已用 %.0f%%", label, w.Utilization)
-	if !w.ResetsAt.IsZero() {
-		line += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(cstZone).Format("01-02 15:04"))
-	}
-	return line + "\n"
+	return head + "\n\n" + renderTable([]string{"窗口", "已用", "重置"}, rows)
 }
 
 func humanDur(d time.Duration) string {
@@ -525,15 +572,16 @@ func (g *Gateway) statusText(key string) string {
 	if d := s.RunningFor(); d > 0 {
 		running = "运行中 · 已跑 " + d.Round(time.Second).String()
 	}
-	return fmt.Sprintf(
-		"**📊 运行状态**\n"+
-			"**会话** %s\n"+
-			"**模型** %s\n"+
-			"**目录** %s\n"+
-			"**权限** %s\n"+
-			"**任务** %s · **轮数** %d\n"+
-			"**运行** %s · v%s",
-		status, model, workDir, authority, running, s.TurnCount(), g.uptime(), Version)
+	rows := [][]string{
+		{"会话", status},
+		{"模型", model},
+		{"目录", workDir},
+		{"权限", authority},
+		{"任务", running},
+		{"轮数", fmt.Sprintf("%d", s.TurnCount())},
+		{"运行", g.uptime() + " · v" + Version},
+	}
+	return "**📊 运行状态**\n\n" + renderTable([]string{"项", "值"}, rows)
 }
 
 func (g *Gateway) uptime() string {
@@ -547,8 +595,7 @@ func (g *Gateway) sessionsText() string {
 		return "**💬 会话** 暂无活跃会话。"
 	}
 	turns, cost := g.usageSnapshot()
-	var b strings.Builder
-	fmt.Fprintf(&b, "**💬 活跃会话** %d 个 · 累计 %d 轮 · $%.4f\n", len(snaps), turns, cost)
+	rows := make([][]string, 0, len(snaps))
 	for _, s := range snaps {
 		state := "空闲"
 		if s.Running {
@@ -558,10 +605,14 @@ func (g *Gateway) sessionsText() string {
 		if s.Active {
 			conn = "已连接"
 		}
-		idle := time.Since(s.LastActive).Round(time.Second)
-		fmt.Fprintf(&b, "· `%s` — %s · %s · %d 轮 · 闲置 %s\n", s.Key, conn, state, s.Turns, idle)
+		rows = append(rows, []string{
+			short(s.Key), conn, state,
+			fmt.Sprintf("%d", s.Turns),
+			time.Since(s.LastActive).Round(time.Second).String(),
+		})
 	}
-	return strings.TrimRight(b.String(), "\n")
+	head := fmt.Sprintf("**💬 活跃会话** %d 个 · 累计 %d 轮 · $%.4f", len(snaps), turns, cost)
+	return head + "\n\n" + renderTable([]string{"会话", "连接", "状态", "轮数", "闲置"}, rows)
 }
 
 // commandAliases maps every accepted command token (English + Chinese) to its
@@ -640,67 +691,44 @@ var helpCommands = []helpCommand{
 var helpText = buildHelpText()
 
 func buildHelpText() string {
-	const (
-		hGroup = "类别"
-		hCmd   = "命令"
-		hDesc  = "说明"
-	)
-	wGroup, wCmd, wDesc := displayWidth(hGroup), displayWidth(hCmd), displayWidth(hDesc)
+	headers := []string{"类别", "命令", "说明"}
+	rows := make([][]string, 0, len(helpCommands))
 	for _, c := range helpCommands {
-		if w := displayWidth(c.group); w > wGroup {
-			wGroup = w
-		}
-		if w := displayWidth(c.cmd); w > wCmd {
-			wCmd = w
-		}
-		if w := displayWidth(c.desc); w > wDesc {
-			wDesc = w
-		}
+		rows = append(rows, []string{c.group, c.cmd, c.desc})
 	}
-
-	rule := func(l, m, r string) string {
-		return l + strings.Repeat("─", wGroup+2) + m + strings.Repeat("─", wCmd+2) +
-			m + strings.Repeat("─", wDesc+2) + r
-	}
-	row := func(g, c, d string) string {
-		return "│ " + padDisplay(g, wGroup) + " │ " + padDisplay(c, wCmd) + " │ " + padDisplay(d, wDesc) + " │"
-	}
+	w := colWidths(headers, rows)
 
 	var b strings.Builder
 	b.WriteString("**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n```\n")
-	b.WriteString(rule("┌", "┬", "┐") + "\n")
-	b.WriteString(row(hGroup, hCmd, hDesc) + "\n")
-	b.WriteString(rule("├", "┼", "┤") + "\n")
+	b.WriteString(tableRule(w, "┌", "┬", "┐") + "\n")
+	b.WriteString(tableRow(headers, w) + "\n")
+	b.WriteString(tableRule(w, "├", "┼", "┤") + "\n")
 	prev := ""
 	for i, c := range helpCommands {
-		// A blank line between groups makes the table scannable; show the group
-		// label only on its first row.
+		// Separate groups with a rule and show the group label only on its first
+		// row, so the table stays scannable.
 		if i > 0 && c.group != prev {
-			b.WriteString(rule("├", "┼", "┤") + "\n")
+			b.WriteString(tableRule(w, "├", "┼", "┤") + "\n")
 		}
 		label := c.group
 		if c.group == prev {
 			label = ""
 		}
-		b.WriteString(row(label, c.cmd, c.desc) + "\n")
+		b.WriteString(tableRow([]string{label, c.cmd, c.desc}, w) + "\n")
 		prev = c.group
 	}
-	b.WriteString(rule("└", "┴", "┘") + "\n```\n")
+	b.WriteString(tableRule(w, "└", "┴", "┘") + "\n```\n")
 	b.WriteString("中文别名也可用（如「新对话」「停止」「状态」「联网」）。")
 	return b.String()
 }
 
-// maxPassiveReplies is QQ's cap on passive replies per inbound message.
+// maxPassiveReplies is QQ's cap on passive replies per inbound message (the C2C
+// passive-reply window itself is 60 minutes).
 const maxPassiveReplies = 5
 
 // longTurnNotice is how long a turn runs before the gateway sends a single
 // "still working" reassurance. Kept well inside QQ's passive-reply window.
 const longTurnNotice = 90 * time.Second
-
-// passiveWindow is the conservative cutoff (under QQ's ~5-minute passive-reply
-// expiry) past which a turn's result is delivered by active push instead of a
-// passive reply, falling back to the next-message pending queue.
-const passiveWindow = 4 * time.Minute
 
 // runTurn executes one Claude Code turn for a conversation and sends the reply,
 // including any inbound attachments (downloaded for Claude to read) and any
@@ -751,7 +779,6 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 
 	resuming := sess.GetSessionID()
 	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, resuming != "")
-	started := time.Now()
 	res, err := g.bridge.Run(turnCtx, claude.Request{
 		SessionID:      resuming,
 		Prompt:         prompt,
@@ -762,9 +789,6 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 			g.logger.Printf("[gateway] [%s] tool: %s", key, tool)
 		},
 	})
-	// A turn that ran past the passive window can no longer be answered with a
-	// passive reply; its result must be pushed actively or queued for next time.
-	longTurn := time.Since(started) > passiveWindow
 	if err != nil {
 		if turnCtx.Err() == context.Canceled {
 			g.logger.Printf("[gateway] [%s] turn cancelled", key)
@@ -782,9 +806,9 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		}
 		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
 		if turnCtx.Err() == context.DeadlineExceeded {
-			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。", true)
+			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。")
 		} else {
-			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Claude error): "+short(err.Error()), longTurn)
+			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Claude error): "+short(err.Error()))
 		}
 		return
 	}
@@ -797,7 +821,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		if strings.Contains(strings.ToLower(res.Text), "model") {
 			msg += "\n\n可能是模型设置问题，试试 `/model default` 恢复默认模型。"
 		}
-		g.deliverOrQueue(ctx, r, sess, key, msg, longTurn)
+		g.deliverOrQueue(ctx, r, sess, key, msg)
 		return
 	}
 	if res.SessionID != "" {
@@ -811,7 +835,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	if reply == "" {
 		reply = "(empty response)"
 	}
-	g.deliverOrQueue(ctx, r, sess, key, reply, longTurn)
+	g.deliverOrQueue(ctx, r, sess, key, reply)
 }
 
 // PushToOperator delivers a proactive (active-push) message to the configured
@@ -911,31 +935,27 @@ func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) e
 	return nil
 }
 
-// deliverOrQueue delivers a reply that may have outrun QQ's passive-reply window.
-// If preferActive is set (the turn ran long) it pushes actively from the start;
-// otherwise it sends passively and, on failure, escalates to an active push before
-// finally queueing the text on the session for delivery on the next inbound
-// message. Either path guarantees the reply is not silently lost.
-func (g *Gateway) deliverOrQueue(ctx context.Context, r *responder, sess *session.Session, key, text string, preferActive bool) {
-	if preferActive {
-		r.GoActive()
-	}
-	err := g.deliver(ctx, r, key, text)
-	if err == nil {
-		if r.Active() {
-			g.logger.Printf("[gateway] [%s] reply delivered via active push", key)
-		}
+// deliverOrQueue delivers a turn's reply without wasting the scarce active-push
+// quota. Per the QQ C2C docs a passive reply is valid for 60 minutes (5 per
+// inbound message) while ACTIVE pushes are capped at 4 PER MONTH — so we always
+// try passive first (it covers all but the longest turns), fall back to a single
+// active push only if passive fails (window truly expired), and finally queue the
+// text on the session for delivery on the next inbound message. Every path
+// guarantees the reply is never silently lost.
+func (g *Gateway) deliverOrQueue(ctx context.Context, r *responder, sess *session.Session, key, text string) {
+	if err := g.deliver(ctx, r, key, text); err == nil {
 		return
+	} else {
+		g.logger.Printf("[gateway] [%s] passive delivery failed (%v); trying one active push", key, err)
 	}
-	if !r.Active() {
-		g.logger.Printf("[gateway] [%s] passive delivery failed (%v); trying active push", key, err)
-		r.GoActive()
-		if err = g.deliver(ctx, r, key, text); err == nil {
-			return
-		}
+	r.GoActive()
+	if err := g.deliver(ctx, r, key, text); err == nil {
+		g.logger.Printf("[gateway] [%s] reply delivered via active push (passive window expired)", key)
+		return
+	} else {
+		sess.QueuePending(text)
+		g.logger.Printf("[gateway] [%s] active push unavailable (%v); queued for next inbound message", key, err)
 	}
-	sess.QueuePending(text)
-	g.logger.Printf("[gateway] [%s] active delivery unavailable (%v); queued reply for next inbound message", key, err)
 }
 
 // capChunks collapses chunks beyond max into the last allowed chunk so output

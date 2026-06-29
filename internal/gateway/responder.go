@@ -43,6 +43,7 @@ type responder struct {
 
 	userOpenID string
 	msgID      string // inbound message id, for passive replies
+	eventID    string // event id, for passive replies to events (e.g. FRIEND_ADD) that carry no msg_id
 
 	// nextSeq yields the next monotonic msg_seq for this conversation. Always set
 	// by the gateway when building a responder (bound to the session's counter).
@@ -107,7 +108,13 @@ func (r *responder) Send(ctx context.Context, text string) error {
 func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) error {
 	req := &qq.MessageRequest{MsgSeq: r.nextSeq()}
 	if !r.active.Load() {
-		req.MsgID = r.msgID // passive reply; active pushes omit msg_id
+		// Passive reply: bind to the inbound msg_id, or an event_id when the reply
+		// answers an event (e.g. FRIEND_ADD) that carries no message. Active pushes
+		// omit both.
+		req.MsgID = r.msgID
+		if r.msgID == "" {
+			req.EventID = r.eventID
+		}
 	}
 	applyContent(req, text, asMarkdown)
 	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
