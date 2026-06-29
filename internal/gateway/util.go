@@ -85,17 +85,19 @@ func truncateRunes(s string, maxRunes int) string {
 
 func runeLen(s string) int { return len([]rune(s)) }
 
-// kvLines renders [label, value] pairs as bold-label Markdown lines, e.g.
-// "**会话** 已连接". QQ renders bold but does NOT render code blocks or aligned
-// tables (there is no monospace font), so bold labels — one item per line, with
-// nothing to align across lines — are the clean way to present structured data.
+// kvLines renders [label, value] pairs as a QQ Markdown unordered LIST with bold
+// labels, e.g. "- **会话** 已连接". Per the QQ docs the supported syntax is
+// headings/bold/italic/strikethrough/links/images/lists/quotes/dividers — NOT
+// code blocks, inline code or tables — and a bare "\n" is not a reliable line
+// break (needs a blank line, U+200B, or a list). A list gives each item its own
+// line reliably and renders cleanly; it is the right primitive for structured data.
 func kvLines(pairs [][2]string) string {
 	var b strings.Builder
 	for i, p := range pairs {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString("**" + p[0] + "** " + p[1])
+		b.WriteString("- **" + p[0] + "** " + p[1])
 	}
 	return b.String()
 }

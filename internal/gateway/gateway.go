@@ -217,7 +217,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		// Unknown slash-commands are reported rather than sent to Claude, so a
 		// typo doesn't silently turn into a prompt.
 		if strings.HasPrefix(name, "/") {
-			_ = r.Send(ctx, "❓ 未知命令 `"+name+"`，发送 **`/help`** 查看可用命令。")
+			_ = r.Send(ctx, "❓ 未知命令 "+name+"，发送 **/help** 查看可用命令。")
 			return true
 		}
 		return false
@@ -279,8 +279,10 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "status":
 		_ = r.Send(ctx, g.statusText(key))
 	case "whoami":
-		_ = r.Send(ctx, "**🪪 你的身份** · 私聊 (C2C)\n**open_id**\n"+r.userOpenID+
-			"\n\n把上面的 open_id 填入配置 allowed_users 即可锁定操作者。")
+		_ = r.Send(ctx, "## 🪪 你的身份\n\n"+kvLines([][2]string{
+			{"类型", "私聊 (C2C)"},
+			{"open_id", r.userOpenID},
+		})+"\n\n把 open_id 填入配置 allowed_users 即可锁定操作者。")
 	case "version":
 		_ = r.Send(ctx, fmt.Sprintf("**🏷️ 版本** cc-qq-gateway v%s · 运行 %s", Version, g.uptime()))
 	case "ping":
@@ -296,7 +298,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 }
 
 // modelHint lists the model names the CLI accepts, shown when a name is unknown.
-const modelHint = "可用：`opus` / `sonnet` / `haiku` / `fable`（或完整 id，如 `claude-opus-4-8[1m]`）。恢复默认：`/model default`"
+const modelHint = "可用：opus / sonnet / haiku / fable（或完整 id，如 claude-opus-4-8[1m]）。恢复默认：/model default"
 
 // cmdModel shows or sets the per-conversation model override. The argument is
 // normalized to a value the CLI's --model accepts (display names like
@@ -313,15 +315,15 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += "（默认）"
 		}
-		_ = r.Send(ctx, kvLines([][2]string{
-			{"🧠 当前模型", cur},
+		_ = r.Send(ctx, "## 🧠 模型\n\n"+kvLines([][2]string{
+			{"当前", cur},
 			{"可选", "opus / sonnet / haiku / fable"},
-		})+"\n切换：/model <名称> · 恢复默认：/model default")
+		})+"\n\n切换：/model <名称>　恢复默认：/model default")
 		return
 	}
 	canon, ok := claude.NormalizeModel(arg)
 	if !ok {
-		_ = r.Send(ctx, "⚠️ 无法识别的模型名 `"+arg+"`。\n"+modelHint)
+		_ = r.Send(ctx, "⚠️ 无法识别的模型名 "+arg+"。\n\n"+modelHint)
 		return
 	}
 	sess.SetModel(canon)
@@ -329,7 +331,7 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		_ = r.Send(ctx, "**🧠 模型** 已恢复默认。")
 		return
 	}
-	_ = r.Send(ctx, "**🧠 模型** 已切换为 `"+canon+"`")
+	_ = r.Send(ctx, "🧠 模型已切换为 **"+canon+"**")
 }
 
 // cmdCwd shows or sets the per-conversation working directory override.
@@ -344,9 +346,9 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += "（默认）"
 		}
-		_ = r.Send(ctx, kvLines([][2]string{
-			{"📁 当前工作目录", cur},
-		})+"\n切换：/dir <路径> · 恢复默认：/dir default")
+		_ = r.Send(ctx, "## 📁 工作目录\n\n"+kvLines([][2]string{
+			{"当前", cur},
+		})+"\n\n切换：/dir <路径>　恢复默认：/dir default")
 		return
 	}
 	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
@@ -355,7 +357,7 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 		return
 	}
 	sess.SetWorkDir(arg)
-	_ = r.Send(ctx, "**📁 工作目录** 已切换为 `"+arg+"`")
+	_ = r.Send(ctx, "📁 工作目录已切换为 **"+arg+"**")
 }
 
 // cmdMode shows or sets the per-conversation permission mode.
@@ -377,7 +379,7 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 				modes[i][1] += "（当前）"
 			}
 		}
-		_ = r.Send(ctx, "**🔐 权限模式**\n"+kvLines(modes)+"\n切换：/mode <名称>")
+		_ = r.Send(ctx, "## 🔐 权限模式\n\n"+kvLines(modes)+"\n\n切换：/mode <名称>")
 		return
 	}
 	norm := arg
@@ -393,11 +395,11 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 	case "bypass", "bypasspermissions":
 		norm = "bypass"
 	default:
-		_ = r.Send(ctx, "❓ 未知模式 `"+arg+"`，可选：default / plan / acceptEdits / bypass")
+		_ = r.Send(ctx, "❓ 未知模式 "+arg+"，可选：default / plan / acceptEdits / bypass")
 		return
 	}
 	sess.SetMode(norm)
-	_ = r.Send(ctx, "**🔐 权限模式** 已切换为 `"+norm+"`")
+	_ = r.Send(ctx, "🔐 权限模式已切换为 **"+norm+"**")
 }
 
 // promptShortcuts map a command to a canned prompt that invokes a Claude Code
@@ -416,7 +418,7 @@ var argShortcuts = map[string]bool{"explain": true, "web": true}
 // runShortcut launches a Claude turn from a feature-shortcut command.
 func (g *Gateway) runShortcut(ctx context.Context, r *responder, key, name, tmpl, arg string) {
 	if argShortcuts[name] && arg == "" {
-		_ = r.Send(ctx, "用法：`/"+name+" <内容>`")
+		_ = r.Send(ctx, "用法：/"+name+" <内容>")
 		return
 	}
 	prompt := tmpl
@@ -478,7 +480,7 @@ func (g *Gateway) cmdDoctor(r *responder, key string) {
 			plan = prettyPlan(u.Plan)
 		}
 	}
-	_ = r.Send(context.Background(), "**🩺 环境诊断**\n"+kvLines([][2]string{
+	_ = r.Send(context.Background(), "## 🩺 环境诊断\n\n"+kvLines([][2]string{
 		{"Claude CLI", strings.TrimSpace(ver)},
 		{"订阅认证", auth + " · " + plan},
 		{"网关", "v" + Version + " · 运行 " + g.uptime()},
@@ -515,11 +517,11 @@ func (g *Gateway) usageText() string {
 	addWindow("Opus·7天", u.Opus)
 	addWindow("Sonnet·7天", u.Sonnet)
 
-	head := "**📊 订阅用量**"
+	head := "## 📊 订阅用量"
 	if u.Plan != "" {
 		head += " · " + prettyPlan(u.Plan)
 	}
-	return head + "\n" + kvLines(rows)
+	return head + "\n\n" + kvLines(rows)
 }
 
 func humanDur(d time.Duration) string {
@@ -583,7 +585,7 @@ func (g *Gateway) statusText(key string) string {
 	if d := s.RunningFor(); d > 0 {
 		running = "运行中 · 已跑 " + d.Round(time.Second).String()
 	}
-	return "**📊 运行状态**\n" + kvLines([][2]string{
+	return "## 📊 运行状态\n\n" + kvLines([][2]string{
 		{"会话", status},
 		{"模型", model},
 		{"目录", workDir},
@@ -620,8 +622,8 @@ func (g *Gateway) sessionsText() string {
 			fmt.Sprintf("%s · %s · %d 轮 · 闲置 %s", conn, state, s.Turns, time.Since(s.LastActive).Round(time.Second)),
 		})
 	}
-	head := fmt.Sprintf("**💬 活跃会话** %d 个 · 累计 %d 轮 · $%.4f", len(snaps), turns, cost)
-	return head + "\n" + kvLines(rows)
+	head := fmt.Sprintf("## 💬 活跃会话 %d 个 · 累计 %d 轮 · $%.4f", len(snaps), turns, cost)
+	return head + "\n\n" + kvLines(rows)
 }
 
 // commandAliases maps every accepted command token (English + Chinese) to its
@@ -689,15 +691,17 @@ var helpGroups = []helpGroup{
 var helpText = buildHelpText()
 
 func buildHelpText() string {
+	// QQ Markdown supports headings/bold/lists but not code blocks or tables, and a
+	// bare "\n" is an unreliable line break — so use a heading, then one bold-label
+	// paragraph per group separated by blank lines.
 	var b strings.Builder
-	b.WriteString("**🤖 Claude Code · QQ** —— 直接发需求即可，下面命令可选：\n")
+	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，下面命令可选：")
 	for _, g := range helpGroups {
-		b.WriteString("\n**【" + g.title + "】** ")
 		parts := make([]string, 0, len(g.cmds))
 		for _, c := range g.cmds {
 			parts = append(parts, c.cmd+" "+c.desc)
 		}
-		b.WriteString(strings.Join(parts, " · "))
+		b.WriteString("\n\n**【" + g.title + "】** " + strings.Join(parts, " · "))
 	}
 	return b.String()
 }
@@ -799,7 +803,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		g.logger.Printf("[gateway] [%s] claude returned is_error: %s", key, short(res.Text))
 		msg := "⚠️ Claude 返回错误：" + strings.TrimSpace(res.Text)
 		if strings.Contains(strings.ToLower(res.Text), "model") {
-			msg += "\n\n可能是模型设置问题，试试 `/model default` 恢复默认模型。"
+			msg += "\n\n可能是模型设置问题，试试 /model default 恢复默认模型。"
 		}
 		g.deliverOrQueue(ctx, r, sess, key, msg)
 		return
