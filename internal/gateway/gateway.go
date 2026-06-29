@@ -279,8 +279,8 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "status":
 		_ = r.Send(ctx, g.statusText(key))
 	case "whoami":
-		_ = r.Send(ctx, "**🪪 你的身份** · 私聊 (C2C)\n你的 open_id：\n```\n"+r.userOpenID+
-			"\n```\n把它填入配置 `allowed_users` 即可锁定操作者。")
+		_ = r.Send(ctx, "**🪪 你的身份** · 私聊 (C2C)\n**open_id**\n"+r.userOpenID+
+			"\n\n把上面的 open_id 填入配置 allowed_users 即可锁定操作者。")
 	case "version":
 		_ = r.Send(ctx, fmt.Sprintf("**🏷️ 版本** cc-qq-gateway v%s · 运行 %s", Version, g.uptime()))
 	case "ping":
@@ -313,10 +313,10 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += "（默认）"
 		}
-		_ = r.Send(ctx, "**🧠 模型**\n\n"+renderKV([][]string{
-			{"当前", cur},
+		_ = r.Send(ctx, kvLines([][2]string{
+			{"🧠 当前模型", cur},
 			{"可选", "opus / sonnet / haiku / fable"},
-		})+"\n切换 `/model <名称>` · 恢复默认 `/model default`")
+		})+"\n切换：/model <名称> · 恢复默认：/model default")
 		return
 	}
 	canon, ok := claude.NormalizeModel(arg)
@@ -344,9 +344,9 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += "（默认）"
 		}
-		_ = r.Send(ctx, "**📁 工作目录**\n\n"+renderKV([][]string{
-			{"当前", cur},
-		})+"\n切换 `/dir <路径>` · 恢复默认 `/dir default`")
+		_ = r.Send(ctx, kvLines([][2]string{
+			{"📁 当前工作目录", cur},
+		})+"\n切换：/dir <路径> · 恢复默认：/dir default")
 		return
 	}
 	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
@@ -366,18 +366,18 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 		if cur == "" {
 			cur = "default"
 		}
-		modes := [][]string{
+		modes := [][2]string{
 			{"default", "按网关配置"},
 			{"plan", "只读规划"},
 			{"acceptEdits", "自动接受改动"},
 			{"bypass", "完全放行"},
 		}
-		for _, m := range modes {
-			if m[0] == cur {
-				m[1] += "（当前）"
+		for i := range modes {
+			if modes[i][0] == cur {
+				modes[i][1] += "（当前）"
 			}
 		}
-		_ = r.Send(ctx, "**🔐 权限模式**\n\n"+renderTable([]string{"模式", "说明"}, modes)+"\n切换 `/mode <名称>`")
+		_ = r.Send(ctx, "**🔐 权限模式**\n"+kvLines(modes)+"\n切换：/mode <名称>")
 		return
 	}
 	norm := arg
@@ -439,7 +439,7 @@ func (g *Gateway) runManaged(r *responder, key, label string, args ...string) {
 			out = "（无输出）"
 		}
 	}
-	g.deliver(context.Background(), r, key, "**"+label+"**\n```\n"+out+"\n```")
+	g.deliver(context.Background(), r, key, "**"+label+"**\n"+out)
 }
 
 // cmdMemory shows the CLAUDE.md memory files Claude loads (global + project).
@@ -450,7 +450,7 @@ func (g *Gateway) cmdMemory(r *responder, key string) {
 		candidates = append(candidates, filepath.Join(wd, "CLAUDE.md"))
 	}
 	var b strings.Builder
-	b.WriteString("**🧠 记忆 (CLAUDE.md)**\n")
+	b.WriteString("**🧠 记忆 (CLAUDE.md)**")
 	found := false
 	for _, p := range candidates {
 		data, err := os.ReadFile(p)
@@ -458,10 +458,10 @@ func (g *Gateway) cmdMemory(r *responder, key string) {
 			continue
 		}
 		found = true
-		b.WriteString("\n`" + p + "`\n```\n" + strings.TrimSpace(string(data)) + "\n```\n")
+		b.WriteString("\n\n**" + p + "**\n" + strings.TrimSpace(string(data)))
 	}
 	if !found {
-		b.WriteString("（暂无 CLAUDE.md 记忆文件；让我“记住…”即可创建）")
+		b.WriteString("\n（暂无 CLAUDE.md 记忆文件；让我“记住…”即可创建）")
 	}
 	g.deliver(context.Background(), r, key, b.String())
 }
@@ -471,24 +471,19 @@ func (g *Gateway) cmdMemory(r *responder, key string) {
 func (g *Gateway) cmdDoctor(r *responder, key string) {
 	ver, _ := g.bridge.RunCLI(context.Background(), "--version")
 	plan := "未知"
-	// Keep cell values emoji-free: emoji width is renderer-dependent and would
-	// misalign the monospace table. Emoji live in the bold header outside the fence.
-	auth := "未认证"
+	auth := "❌ 失败"
 	if u, err := claude.FetchUsage(context.Background()); err == nil {
-		auth = "已认证"
+		auth = "✅ 正常"
 		if u.Plan != "" {
 			plan = prettyPlan(u.Plan)
 		}
 	}
-	rows := [][]string{
+	_ = r.Send(context.Background(), "**🩺 环境诊断**\n"+kvLines([][2]string{
 		{"Claude CLI", strings.TrimSpace(ver)},
-		{"订阅认证", auth},
-		{"订阅套餐", plan},
-		{"网关版本", "v" + Version},
-		{"运行时长", g.uptime()},
+		{"订阅认证", auth + " · " + plan},
+		{"网关", "v" + Version + " · 运行 " + g.uptime()},
 		{"工具权限", authorityLabel(g.bridge.FullAuthority())},
-	}
-	_ = r.Send(context.Background(), "**🩺 环境诊断**\n\n"+renderTable([]string{"检查项", "结果"}, rows))
+	}))
 }
 
 func authorityLabel(full bool) string {
@@ -504,27 +499,27 @@ func (g *Gateway) usageText() string {
 		turns, cost := g.usageSnapshot()
 		return fmt.Sprintf("**📊 用量**\n订阅用量获取失败：%s\n本网关累计 %d 轮 · $%.4f", short(err.Error()), turns, cost)
 	}
-	rows := make([][]string, 0, 4)
+	rows := make([][2]string, 0, 4)
 	addWindow := func(label string, w claude.Window) {
 		if !w.Has {
 			return
 		}
-		reset := "—"
+		val := fmt.Sprintf("%.0f%%", w.Utilization)
 		if !w.ResetsAt.IsZero() {
-			reset = fmt.Sprintf("%s后（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(cstZone).Format("01-02 15:04"))
+			val += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(cstZone).Format("01-02 15:04"))
 		}
-		rows = append(rows, []string{label, fmt.Sprintf("%.0f%%", w.Utilization), reset})
+		rows = append(rows, [2]string{label, val})
 	}
 	addWindow("5 小时", u.FiveHour)
 	addWindow("7 天", u.SevenDay)
-	addWindow("7天·Opus", u.Opus)
-	addWindow("7天·Sonnet", u.Sonnet)
+	addWindow("Opus·7天", u.Opus)
+	addWindow("Sonnet·7天", u.Sonnet)
 
 	head := "**📊 订阅用量**"
 	if u.Plan != "" {
 		head += " · " + prettyPlan(u.Plan)
 	}
-	return head + "\n\n" + renderTable([]string{"窗口", "已用", "重置"}, rows)
+	return head + "\n" + kvLines(rows)
 }
 
 func humanDur(d time.Duration) string {
@@ -588,7 +583,7 @@ func (g *Gateway) statusText(key string) string {
 	if d := s.RunningFor(); d > 0 {
 		running = "运行中 · 已跑 " + d.Round(time.Second).String()
 	}
-	rows := [][]string{
+	return "**📊 运行状态**\n" + kvLines([][2]string{
 		{"会话", status},
 		{"模型", model},
 		{"目录", workDir},
@@ -596,8 +591,7 @@ func (g *Gateway) statusText(key string) string {
 		{"任务", running},
 		{"轮数", fmt.Sprintf("%d", s.TurnCount())},
 		{"运行", g.uptime() + " · v" + Version},
-	}
-	return "**📊 运行状态**\n\n" + renderTable([]string{"项", "值"}, rows)
+	})
 }
 
 func (g *Gateway) uptime() string {
@@ -611,7 +605,7 @@ func (g *Gateway) sessionsText() string {
 		return "**💬 会话** 暂无活跃会话。"
 	}
 	turns, cost := g.usageSnapshot()
-	rows := make([][]string, 0, len(snaps))
+	rows := make([][2]string, 0, len(snaps))
 	for _, s := range snaps {
 		state := "空闲"
 		if s.Running {
@@ -621,14 +615,13 @@ func (g *Gateway) sessionsText() string {
 		if s.Active {
 			conn = "已连接"
 		}
-		rows = append(rows, []string{
-			short(s.Key), conn, state,
-			fmt.Sprintf("%d", s.Turns),
-			time.Since(s.LastActive).Round(time.Second).String(),
+		rows = append(rows, [2]string{
+			short(s.Key),
+			fmt.Sprintf("%s · %s · %d 轮 · 闲置 %s", conn, state, s.Turns, time.Since(s.LastActive).Round(time.Second)),
 		})
 	}
 	head := fmt.Sprintf("**💬 活跃会话** %d 个 · 累计 %d 轮 · $%.4f", len(snaps), turns, cost)
-	return head + "\n\n" + renderTable([]string{"会话", "连接", "状态", "轮数", "闲置"}, rows)
+	return head + "\n" + kvLines(rows)
 }
 
 // commandAliases maps every accepted command token (English + Chinese) to its
@@ -667,39 +660,24 @@ var commandAliases = map[string]string{
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
-// helpCommand is one command shown in the /help table.
+// helpCommand is one command shown in /help.
 type helpCommand struct{ cmd, desc string }
 
-// helpCommands is the canonical command list rendered by /help. It is laid out as
-// a symmetric four-column table (指令|说明|指令|说明) split into two equal halves,
-// so keep the count even (currently 24 → 12 + 12) and descriptions short.
-var helpCommands = []helpCommand{
-	// left half (rows 1-12)
-	{"/new", "新对话"},
-	{"/retry", "重做上条"},
-	{"/stop", "中断任务"},
-	{"/model", "切换模型"},
-	{"/think", "深度思考"},
-	{"/dir", "工作目录"},
-	{"/mode", "权限模式"},
-	{"/agents", "子代理"},
-	{"/mcp", "MCP 服务"},
-	{"/memory", "查看记忆"},
-	{"/doctor", "环境诊断"},
-	{"/review", "代码评审"},
-	// right half (rows 1-12)
-	{"/diff", "git 改动"},
-	{"/explain", "解释内容"},
-	{"/web", "联网搜索"},
-	{"/init", "生成文档"},
-	{"/usage", "用量额度"},
-	{"/cost", "上次花费"},
-	{"/status", "运行状态"},
-	{"/sessions", "活跃会话"},
-	{"/whoami", "我的身份"},
-	{"/version", "版本信息"},
-	{"/ping", "连通测试"},
-	{"/help", "显示帮助"},
+// helpGroup is a labelled set of commands.
+type helpGroup struct {
+	title string
+	cmds  []helpCommand
+}
+
+// helpGroups is the canonical command list rendered by /help, grouped by area.
+// QQ can't render aligned tables (no monospace), so /help is a grouped Markdown
+// list with bold group labels — clean and scannable on QQ.
+var helpGroups = []helpGroup{
+	{"对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上条"}, {"/stop", "中断任务"}}},
+	{"配置", []helpCommand{{"/model", "模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
+	{"Claude", []helpCommand{{"/agents", "子代理"}, {"/mcp", "MCP"}, {"/memory", "记忆"}, {"/doctor", "诊断"}}},
+	{"快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "git 改动"}, {"/explain", "解释"}, {"/web", "联网"}, {"/init", "生成文档"}}},
+	{"信息", []helpCommand{{"/usage", "用量"}, {"/cost", "花费"}, {"/status", "状态"}, {"/sessions", "会话"}, {"/whoami", "身份"}, {"/version", "版本"}, {"/ping", "连通"}, {"/help", "帮助"}}},
 }
 
 // helpText is the rendered /help message: a Markdown intro plus a monospace,
@@ -711,22 +689,17 @@ var helpCommands = []helpCommand{
 var helpText = buildHelpText()
 
 func buildHelpText() string {
-	// Symmetric four columns: 指令 | 说明 | 指令 | 说明. Split the list into two
-	// equal halves down the middle, pairing row i of the left half with row i of
-	// the right half. The left column gets the extra row if the count is odd.
-	headers := []string{"指令", "说明", "指令", "说明"}
-	half := (len(helpCommands) + 1) / 2
-	rows := make([][]string, 0, half)
-	for i := 0; i < half; i++ {
-		left := helpCommands[i]
-		row := []string{left.cmd, left.desc, "", ""}
-		if j := i + half; j < len(helpCommands) {
-			row[2], row[3] = helpCommands[j].cmd, helpCommands[j].desc
+	var b strings.Builder
+	b.WriteString("**🤖 Claude Code · QQ** —— 直接发需求即可，下面命令可选：\n")
+	for _, g := range helpGroups {
+		b.WriteString("\n**【" + g.title + "】** ")
+		parts := make([]string, 0, len(g.cmds))
+		for _, c := range g.cmds {
+			parts = append(parts, c.cmd+" "+c.desc)
 		}
-		rows = append(rows, row)
+		b.WriteString(strings.Join(parts, " · "))
 	}
-	return "**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n" +
-		renderTable(headers, rows)
+	return b.String()
 }
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message (the C2C

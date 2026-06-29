@@ -41,9 +41,10 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
   every reply / active push / notify to that user) so a seq is never reused — QQ
   rejects reuse with code `40054005`.
 - **Rich built-in commands** — `/help`, `/status`, `/usage`, `/sessions`,
-  `/doctor` and more render as **aligned box tables** (QQ-safe: a monospace code
-  block, since QQ doesn't render Markdown pipe tables). English + Chinese aliases.
-  See [Commands](#commands).
+  `/doctor` and more. QQ renders only a limited Markdown subset (bold/italic/
+  headings/lists/quotes/links — **no** fenced code blocks or pipe tables, no
+  monospace), so outputs use bold labels + grouped lists for a clean, scannable
+  layout. English + Chinese aliases. See [Commands](#commands).
 - **Always-online resilience** — a supervised, self-healing connection that
   reconnects forever, detects dead ("zombie") links with a heartbeat watchdog,
   recovers from panics, and resumes the gateway session across drops. See
