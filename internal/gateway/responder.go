@@ -121,6 +121,27 @@ func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) 
 	return err
 }
 
+// SendKeyboard sends a markdown message with an inline button grid attached. A
+// keyboard must ride on markdown content (QQ rejects a keyboard-only message), so
+// mdText must be non-empty. Buttons need native markdown, so this does not fall
+// back to plain text — callers should fall back to a plain reply on error.
+func (r *responder) SendKeyboard(ctx context.Context, mdText string, kb *qq.MessageKeyboard) error {
+	req := &qq.MessageRequest{
+		MsgSeq:   r.nextSeq(),
+		MsgType:  qq.MsgTypeMarkdown,
+		Markdown: &qq.MessageMarkdown{Content: mdText},
+		Keyboard: kb,
+	}
+	if !r.active.Load() {
+		req.MsgID = r.msgID
+		if r.msgID == "" {
+			req.EventID = r.eventID
+		}
+	}
+	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
+	return err
+}
+
 // SendMedia uploads one media item (image/file/video/audio) and sends it to the
 // user. localPath is preferred when non-empty, else the URL is uploaded by ref.
 func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url string) error {

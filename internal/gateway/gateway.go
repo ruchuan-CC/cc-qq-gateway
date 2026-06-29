@@ -290,7 +290,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "sessions":
 		_ = r.Send(ctx, g.sessionsText())
 	case "help":
-		_ = r.Send(ctx, helpText)
+		g.sendHelp(ctx, r)
 	default:
 		return false
 	}
@@ -689,6 +689,47 @@ var helpGroups = []helpGroup{
 // still-readable framed text if markdown falls back to plain). Columns are padded
 // by display width (CJK = 2 cells) so Chinese and ASCII line up. Built once.
 var helpText = buildHelpText()
+
+// sendHelp sends /help as an interactive button grid (custom keyboard, tapping a
+// button runs that command — single-chat only), falling back to the plain text
+// list if the keyboard send fails (e.g. markdown unavailable).
+func (g *Gateway) sendHelp(ctx context.Context, r *responder) {
+	title := "## 🤖 Claude Code · QQ\n\n直接发需求，或点下面的命令 👇"
+	if err := r.SendKeyboard(ctx, title, buildHelpKeyboard()); err != nil {
+		g.logger.Printf("[gateway] help keyboard send failed (%v); falling back to text", err)
+		_ = r.Send(ctx, helpText)
+	}
+}
+
+// buildHelpKeyboard lays the commands out as a button grid (≤5 rows × 5 buttons).
+// Each button is labelled with its short description and, when tapped, auto-sends
+// the command (action type 2 + enter, C2C only).
+func buildHelpKeyboard() *qq.MessageKeyboard {
+	var btns []qq.KeyboardButton
+	for _, grp := range helpGroups {
+		for _, c := range grp.cmds {
+			btns = append(btns, qq.KeyboardButton{
+				RenderData: qq.ButtonRender{Label: c.desc, VisitedLabel: c.desc, Style: qq.ButtonStyleGray},
+				Action: qq.ButtonAction{
+					Type:          qq.ButtonActionCommand,
+					Permission:    qq.ButtonPermission{Type: qq.ButtonPermAll},
+					Data:          c.cmd,
+					Enter:         true,
+					UnsupportTips: "请更新 QQ 到最新版以使用按钮",
+				},
+			})
+		}
+	}
+	var rows []qq.KeyboardRow
+	for i := 0; i < len(btns); i += 5 {
+		end := i + 5
+		if end > len(btns) {
+			end = len(btns)
+		}
+		rows = append(rows, qq.KeyboardRow{Buttons: btns[i:end]})
+	}
+	return &qq.MessageKeyboard{Content: &qq.KeyboardContent{Rows: rows}}
+}
 
 func buildHelpText() string {
 	// QQ Markdown supports headings/bold/lists but not code blocks or tables, and a
