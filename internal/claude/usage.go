@@ -27,12 +27,10 @@ type Window struct {
 // Usage is a snapshot of the subscription's usage/limits.
 type Usage struct {
 	Plan     string // e.g. "default_claude_max_20x"
-	Email    string
 	FiveHour Window
 	SevenDay Window
 	Opus     Window
 	Sonnet   Window
-	TokenExp time.Time
 }
 
 type apiWindow struct {
@@ -73,7 +71,6 @@ func FetchUsage(ctx context.Context) (*Usage, error) {
 	var creds struct {
 		OAuth struct {
 			AccessToken string `json:"accessToken"`
-			ExpiresAt   int64  `json:"expiresAt"`
 		} `json:"claudeAiOauth"`
 	}
 	if err := json.Unmarshal(data, &creds); err != nil {
@@ -95,24 +92,19 @@ func FetchUsage(ctx context.Context) (*Usage, error) {
 	}
 
 	u := &Usage{
-		TokenExp: time.UnixMilli(creds.OAuth.ExpiresAt),
 		FiveHour: raw.FiveHour.to(),
 		SevenDay: raw.SevenDay.to(),
 		Opus:     raw.SevenDayOpus.to(),
 		Sonnet:   raw.SevenDaySonnet.to(),
 	}
 
-	// Profile is best-effort (plan name + email).
+	// Profile is best-effort (plan / rate-limit tier).
 	var prof struct {
-		Account struct {
-			Email string `json:"email"`
-		} `json:"account"`
 		Organization struct {
 			RateLimitTier string `json:"rate_limit_tier"`
 		} `json:"organization"`
 	}
 	if getJSON(ctx, profileURL, tok, &prof) == nil {
-		u.Email = prof.Account.Email
 		u.Plan = prof.Organization.RateLimitTier
 	}
 	return u, nil

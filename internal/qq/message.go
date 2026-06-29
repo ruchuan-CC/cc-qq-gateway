@@ -44,20 +44,19 @@ const (
 	FileTypeFile  = 4
 )
 
-// MediaUploadRequest uploads rich media for a C2C message.
+// MediaUploadRequest uploads rich media for a C2C message. The gateway always
+// uploads then sends in two steps (it never sets srv_send_msg), so only the
+// upload inputs are modeled here.
 type MediaUploadRequest struct {
-	FileType   int    `json:"file_type"`
-	URL        string `json:"url,omitempty"`
-	SrvSendMsg bool   `json:"srv_send_msg"`
-	FileData   string `json:"file_data,omitempty"`
+	FileType int    `json:"file_type"`
+	URL      string `json:"url,omitempty"`
+	FileData string `json:"file_data,omitempty"`
 }
 
-// MediaUploadResponse is the result of a rich-media upload.
+// MediaUploadResponse is the result of a rich-media upload. Only file_info is
+// used — it is passed straight into the follow-up MsgTypeMedia send.
 type MediaUploadResponse struct {
-	FileUUID string `json:"file_uuid,omitempty"`
 	FileInfo string `json:"file_info,omitempty"`
-	TTL      int    `json:"ttl,omitempty"`
-	ID       string `json:"id,omitempty"` // present only when SrvSendMsg=true
 }
 
 // UploadC2CMedia uploads rich media destined for a user (single chat).

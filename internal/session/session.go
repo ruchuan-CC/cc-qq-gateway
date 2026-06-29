@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,17 +37,30 @@ type Session struct {
 	cancel     context.CancelFunc
 	running    bool
 	startedAt  time.Time // when the in-flight turn began, for /status elapsed time
-	lastPrompt string  // last user message, for /retry
-	lastCost   float64 // last turn cost (USD), for /cost
-	lastDurMS  int     // last turn duration (ms), for /cost
-	thinkNext  bool    // next turn uses extended thinking, set by /think
+	lastPrompt string    // last user message, for /retry
+	lastCost   float64   // last turn cost (USD), for /cost
+	lastDurMS  int       // last turn duration (ms), for /cost
+	thinkNext  bool      // next turn uses extended thinking, set by /think
 
 	// pending holds replies that could not be delivered live (e.g. a long turn
 	// finished after QQ's passive-reply window expired and active push was
 	// unavailable). They are flushed on the conversation's next inbound message,
 	// which opens a fresh passive-reply window. Guarded by ctrl.
 	pending []string
+
+	// seqCounter is a process-lifetime monotonic source for the QQ msg_seq of
+	// every reply sent to this conversation. QQ rejects a reused msg_seq with code
+	// 40054005 ("消息被去重，请检查请求msgseq"), so the counter must be shared across
+	// ALL responders for this user (consecutive turns, active pushes, the notify
+	// endpoint) — a per-responder counter that restarts at 0 each message collides.
+	// It deliberately survives /new and idle resets (only the Claude session id is
+	// cleared) so the sequence never goes backwards while the process lives.
+	seqCounter atomic.Int64
 }
+
+// NextSeq returns the next monotonic msg_seq for a reply to this conversation.
+// The first value is 1 (msg_seq 0 is omitted on the wire by omitempty).
+func (s *Session) NextSeq() int { return int(s.seqCounter.Add(1)) }
 
 // QueuePending stores a reply that could not be delivered now, for delivery on
 // the next inbound message. Empty strings are ignored.
@@ -255,22 +269,6 @@ func (m *Manager) Reset(key string) bool {
 	}
 	s.ClearClaude()
 	return true
-}
-
-// Touch updates the last-active time.
-func (m *Manager) Touch(key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if s, ok := m.sessions[key]; ok {
-		s.LastActive = time.Now()
-	}
-}
-
-// Count returns the number of live sessions.
-func (m *Manager) Count() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.sessions)
 }
 
 // Summary is a point-in-time view of a conversation, for status commands.

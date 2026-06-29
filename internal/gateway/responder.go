@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 	"sync/atomic"
 
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
@@ -35,15 +34,19 @@ func disablesMarkdown(e *qq.APIError) bool {
 }
 
 // responder sends replies back to the single-chat (C2C) user a message came from.
-// It tracks the passive-reply sequence number required by the C2C send API.
+// The QQ msg_seq required by the C2C send API is drawn from nextSeq, a
+// per-conversation monotonic counter (see session.Session.NextSeq) so that
+// consecutive turns, active pushes and notify messages to the same user never
+// reuse a seq — reuse is rejected by QQ as code 40054005.
 type responder struct {
 	client *qq.Client
 
 	userOpenID string
 	msgID      string // inbound message id, for passive replies
 
-	sendMu sync.Mutex // serializes sends so seq stays monotonic under concurrency
-	seq    int        // passive-reply sequence
+	// nextSeq yields the next monotonic msg_seq for this conversation. Always set
+	// by the gateway when building a responder (bound to the session's counter).
+	nextSeq func() int
 
 	// active, once set, switches sends from passive replies (bound to msgID, which
 	// QQ expires after ~5 minutes) to active pushes (msgID omitted). Used to deliver
@@ -102,11 +105,7 @@ func (r *responder) Send(ctx context.Context, text string) error {
 
 // sendOnce performs exactly one C2C send in the requested format.
 func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) error {
-	r.sendMu.Lock()
-	r.seq++
-	seq := r.seq
-	r.sendMu.Unlock()
-	req := &qq.MessageRequest{MsgSeq: seq}
+	req := &qq.MessageRequest{MsgSeq: r.nextSeq()}
 	if !r.active.Load() {
 		req.MsgID = r.msgID // passive reply; active pushes omit msg_id
 	}
@@ -132,14 +131,10 @@ func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url 
 	if err != nil {
 		return fmt.Errorf("upload media: %w", err)
 	}
-	r.sendMu.Lock()
-	r.seq++
-	seq := r.seq
-	r.sendMu.Unlock()
 	req := &qq.MessageRequest{
 		MsgType: qq.MsgTypeMedia,
 		Media:   &qq.MessageMedia{FileInfo: info.FileInfo},
-		MsgSeq:  seq,
+		MsgSeq:  r.nextSeq(),
 	}
 	if !r.active.Load() {
 		req.MsgID = r.msgID

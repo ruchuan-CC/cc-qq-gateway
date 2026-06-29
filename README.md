@@ -30,8 +30,9 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
 - **Conversational sessions** — one resumable Claude Code session for the
   single-chat conversation, with idle-reset and in-order, non-overlapping turns.
 - **Single-chat (C2C) messages** — handles `C2C_MESSAGE_CREATE` only. Passive
-  replies use the inbound `msg_id`/`event_id` with the required, auto-incrementing
-  `msg_seq`.
+  replies use the inbound `msg_id` with a **per-conversation monotonic `msg_seq`**
+  shared across every reply, active push and notify message to that user, so a seq
+  is never reused (QQ rejects reuse with code `40054005`).
 - **Rich built-in commands (cc-connect style)** — `/help`, `/reset`, `/status`,
   `/sessions`, `/model`, `/cwd`, `/stop`, `/whoami`, `/ping`, `/version`, each
   with English and Chinese aliases. See [Commands](#commands).

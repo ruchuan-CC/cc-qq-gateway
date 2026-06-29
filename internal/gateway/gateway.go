@@ -95,11 +95,13 @@ func (g *Gateway) HandleEvent(ctx context.Context, p *qq.Payload) {
 			g.logger.Printf("[gateway] ignoring c2c message from non-allowlisted user %s", m.Author.UserOpenID)
 			return
 		}
+		sess := g.sessions.Get("c2c:" + m.Author.UserOpenID)
 		r := &responder{
 			client:     g.client,
 			userOpenID: m.Author.UserOpenID,
 			msgID:      m.ID,
 			asMarkdown: g.cfg.ReplyAsMarkdown,
+			nextSeq:    sess.NextSeq,
 		}
 		g.dispatch(ctx, r, cleanContent(m.Content), m.Attachments)
 
@@ -598,21 +600,17 @@ var commandAliases = map[string]string{
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
-const helpText = "**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n" +
-	"| 命令 | 说明 | 命令 | 说明 |\n" +
-	"| --- | --- | --- | --- |\n" +
-	"| /new | 新对话 | /agents | 后台子代理 |\n" +
-	"| /retry | 重做上一条 | /review | 代码评审 |\n" +
-	"| /stop | 中断任务 | /diff | 查看 git 改动 |\n" +
-	"| /model | 切换模型 | /mcp | MCP 服务器 |\n" +
-	"| /think | 深度思考 | /memory | 查看记忆 |\n" +
-	"| /dir | 工作目录 | /explain | 解释代码/内容 |\n" +
-	"| /mode | 权限模式 | /web | 联网搜索 |\n" +
-	"| /usage | 用量额度 | /doctor | 环境诊断 |\n" +
-	"| /cost | 上次花费 | /init | 生成 CLAUDE.md |\n" +
-	"| /status | 运行状态 | /sessions | 活跃会话 |\n" +
-	"| /whoami | 我的 open_id | /version | 版本信息 |\n" +
-	"| /help | 显示帮助 | /ping | 连通测试 |"
+// helpText avoids Markdown pipe tables on purpose: QQ does not render them
+// reliably (the same reason ProtocolPrompt tells Claude to avoid them), so the
+// commands are laid out as compact bold-label lines that read cleanly whether the
+// bot has native-markdown approval or falls back to plain text.
+const helpText = "**🤖 Claude Code · QQ** —— 直接说需求即可，下列命令可选：\n\n" +
+	"**对话** /new 新对话 · /retry 重做上一条 · /stop 中断任务\n" +
+	"**配置** /model 模型 · /think 深度思考 · /dir 工作目录 · /mode 权限模式\n" +
+	"**Claude** /agents 子代理 · /mcp MCP · /memory 记忆 · /doctor 诊断\n" +
+	"**快捷** /review 代码评审 · /diff git 改动 · /explain 解释 · /web 联网 · /init 生成 CLAUDE.md\n" +
+	"**信息** /usage 用量 · /cost 上次花费 · /status 状态 · /sessions 会话 · /whoami 身份 · /version 版本 · /ping 连通\n\n" +
+	"中文别名也可用（如「新对话」「停止」「状态」），或 /help 再看一次。"
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message.
 const maxPassiveReplies = 5
@@ -757,11 +755,12 @@ func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
 	if openID == "" {
 		return fmt.Errorf("no notify target (set gateway.notify_open_id or allowed_users)")
 	}
-	r := &responder{client: g.client, userOpenID: openID, asMarkdown: g.cfg.ReplyAsMarkdown}
+	key := "c2c:" + openID
+	sess := g.sessions.Get(key)
+	r := &responder{client: g.client, userOpenID: openID, asMarkdown: g.cfg.ReplyAsMarkdown, nextSeq: sess.NextSeq}
 	r.GoActive()
-	key := r.conversationKey()
 	if err := g.deliver(ctx, r, key, text); err != nil {
-		g.sessions.Get(key).QueuePending(text)
+		sess.QueuePending(text)
 		g.logger.Printf("[gateway] [%s] notify active push failed (%v); queued for next inbound", key, err)
 		return nil
 	}

@@ -4,12 +4,12 @@ import "testing"
 
 func TestIsLoopbackAddr(t *testing.T) {
 	cases := map[string]bool{
-		"127.0.0.1:8787": true,
-		"localhost:8787": true,
-		"[::1]:8787":     true,
-		"0.0.0.0:8787":   false,
-		"":               false,
-		"127.0.0.1":      false, // missing port
+		"127.0.0.1:8787":     true,
+		"localhost:8787":     true,
+		"[::1]:8787":         true,
+		"0.0.0.0:8787":       false,
+		"":                   false,
+		"127.0.0.1":          false, // missing port
 		"38.246.237.30:8787": false,
 	}
 	for addr, want := range cases {
