@@ -17,7 +17,6 @@ type MessageRequest struct {
 	Content  string           `json:"content,omitempty"`
 	MsgType  int              `json:"msg_type"`
 	Markdown *MessageMarkdown `json:"markdown,omitempty"`
-	Keyboard *MessageKeyboard `json:"keyboard,omitempty"`
 	Media    *MessageMedia    `json:"media,omitempty"`
 	EventID  string           `json:"event_id,omitempty"`
 	MsgID    string           `json:"msg_id,omitempty"`

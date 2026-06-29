@@ -14,34 +14,30 @@ func TestHelpCommandsAreReal(t *testing.T) {
 	}
 }
 
-// The /help button grid must stay within QQ's keyboard limits (≤5 rows, ≤5
-// buttons per row) and every button must auto-send a real command.
-func TestHelpKeyboardWithinLimits(t *testing.T) {
-	kb := buildHelpKeyboard()
-	rows := kb.Content.Rows
-	if len(rows) > 5 {
-		t.Fatalf("keyboard has %d rows, QQ allows at most 5", len(rows))
+// The /help table image must be built from every real command, in a 4-column
+// (命令|说明|命令|说明) layout.
+func TestHelpTableData(t *testing.T) {
+	headers, rows := helpTableData()
+	if len(headers) != 4 {
+		t.Fatalf("help table has %d columns, want 4", len(headers))
 	}
 	total := 0
 	for _, g := range helpGroups {
 		total += len(g.cmds)
 	}
-	got := 0
+	cells := 0
 	for _, row := range rows {
-		if len(row.Buttons) > 5 {
-			t.Errorf("a row has %d buttons, QQ allows at most 5", len(row.Buttons))
-		}
-		for _, b := range row.Buttons {
-			got++
-			if _, ok := commandAliases[b.Action.Data]; !ok {
-				t.Errorf("button data %q is not a real command", b.Action.Data)
+		for _, c := range []string{row[0], row[2]} { // the two command columns
+			if c == "" {
+				continue
 			}
-			if b.Action.Type != 2 || !b.Action.Enter {
-				t.Errorf("button %q should auto-send (type 2 + enter)", b.Action.Data)
+			cells++
+			if _, ok := commandAliases[c]; !ok {
+				t.Errorf("help table lists %q but it is not a real command", c)
 			}
 		}
 	}
-	if got != total {
-		t.Errorf("keyboard has %d buttons, want %d (one per command)", got, total)
+	if cells != total {
+		t.Errorf("help table has %d commands, want %d", cells, total)
 	}
 }

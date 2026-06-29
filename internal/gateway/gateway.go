@@ -675,11 +675,31 @@ type helpGroup struct {
 // QQ can't render aligned tables (no monospace), so /help is a grouped Markdown
 // list with bold group labels — clean and scannable on QQ.
 var helpGroups = []helpGroup{
-	{"对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上条"}, {"/stop", "中断任务"}}},
-	{"配置", []helpCommand{{"/model", "模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
-	{"Claude", []helpCommand{{"/agents", "子代理"}, {"/mcp", "MCP"}, {"/memory", "记忆"}, {"/doctor", "诊断"}}},
-	{"快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "git 改动"}, {"/explain", "解释"}, {"/web", "联网"}, {"/init", "生成文档"}}},
-	{"信息", []helpCommand{{"/usage", "用量"}, {"/cost", "花费"}, {"/status", "状态"}, {"/sessions", "会话"}, {"/whoami", "身份"}, {"/version", "版本"}, {"/ping", "连通"}, {"/help", "帮助"}}},
+	{"对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}}},
+	{"配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
+	{"Claude", []helpCommand{{"/agents", "后台子代理"}, {"/mcp", "MCP 服务器"}, {"/memory", "查看记忆"}, {"/doctor", "环境诊断"}}},
+	{"快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "查看 git 改动"}, {"/explain", "解释代码/内容"}, {"/web", "联网搜索"}, {"/init", "生成 CLAUDE.md"}}},
+	{"信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/status", "运行状态"}, {"/sessions", "活跃会话"}, {"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
+}
+
+// helpTableData returns the /help command list as a symmetric four-column table
+// (命令 | 说明 | 命令 | 说明): the flat command list split into two equal halves,
+// pairing row i of the left half with row i of the right half.
+func helpTableData() (headers []string, rows [][]string) {
+	var flat []helpCommand
+	for _, g := range helpGroups {
+		flat = append(flat, g.cmds...)
+	}
+	headers = []string{"命令", "说明", "命令", "说明"}
+	half := (len(flat) + 1) / 2
+	for i := 0; i < half; i++ {
+		row := []string{flat[i].cmd, flat[i].desc, "", ""}
+		if j := i + half; j < len(flat) {
+			row[2], row[3] = flat[j].cmd, flat[j].desc
+		}
+		rows = append(rows, row)
+	}
+	return headers, rows
 }
 
 // helpText is the rendered /help message: a Markdown intro plus a monospace,
@@ -690,45 +710,22 @@ var helpGroups = []helpGroup{
 // by display width (CJK = 2 cells) so Chinese and ASCII line up. Built once.
 var helpText = buildHelpText()
 
-// sendHelp sends /help as an interactive button grid (custom keyboard, tapping a
-// button runs that command — single-chat only), falling back to the plain text
-// list if the keyboard send fails (e.g. markdown unavailable).
+// sendHelp sends /help as a rendered table IMAGE (a real bordered "spreadsheet"
+// grid — QQ can't render text tables), falling back to the plain text list if the
+// image can't be rendered (e.g. the CJK font is missing) or sent.
 func (g *Gateway) sendHelp(ctx context.Context, r *responder) {
-	title := "## 🤖 Claude Code · QQ\n\n直接发需求，或点下面的命令 👇"
-	if err := r.SendKeyboard(ctx, title, buildHelpKeyboard()); err != nil {
-		g.logger.Printf("[gateway] help keyboard send failed (%v); falling back to text", err)
-		_ = r.Send(ctx, helpText)
-	}
-}
-
-// buildHelpKeyboard lays the commands out as a button grid (≤5 rows × 5 buttons).
-// Each button is labelled with its short description and, when tapped, auto-sends
-// the command (action type 2 + enter, C2C only).
-func buildHelpKeyboard() *qq.MessageKeyboard {
-	var btns []qq.KeyboardButton
-	for _, grp := range helpGroups {
-		for _, c := range grp.cmds {
-			btns = append(btns, qq.KeyboardButton{
-				RenderData: qq.ButtonRender{Label: c.desc, VisitedLabel: c.desc, Style: qq.ButtonStyleGray},
-				Action: qq.ButtonAction{
-					Type:          qq.ButtonActionCommand,
-					Permission:    qq.ButtonPermission{Type: qq.ButtonPermAll},
-					Data:          c.cmd,
-					Enter:         true,
-					UnsupportTips: "请更新 QQ 到最新版以使用按钮",
-				},
-			})
+	headers, rows := helpTableData()
+	if err := os.MkdirAll(g.cfg.MediaDir, 0o755); err == nil {
+		path := filepath.Join(g.cfg.MediaDir, "help.png")
+		if err := renderTableImagePNG(g.cfg.FontPath, "Claude Code · QQ 命令", headers, rows, path); err != nil {
+			g.logger.Printf("[gateway] help image render failed (%v); falling back to text", err)
+		} else if err := r.SendMedia(ctx, qq.FileTypeImage, path, ""); err != nil {
+			g.logger.Printf("[gateway] help image send failed (%v); falling back to text", err)
+		} else {
+			return
 		}
 	}
-	var rows []qq.KeyboardRow
-	for i := 0; i < len(btns); i += 5 {
-		end := i + 5
-		if end > len(btns) {
-			end = len(btns)
-		}
-		rows = append(rows, qq.KeyboardRow{Buttons: btns[i:end]})
-	}
-	return &qq.MessageKeyboard{Content: &qq.KeyboardContent{Rows: rows}}
+	_ = r.Send(ctx, helpText)
 }
 
 func buildHelpText() string {
