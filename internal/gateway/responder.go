@@ -18,6 +18,22 @@ import (
 // plain text for the rest of the process. Zero value = markdown enabled.
 var markdownDisabled atomic.Bool
 
+// qqErrMsgDeduped is the QQ C2C error code "消息被去重，请检查请求msgseq": the
+// msg_seq collided with an earlier send. It is about sequencing, not markdown, so
+// it must never latch the process-wide markdown downgrade.
+const qqErrMsgDeduped = 40054005
+
+// disablesMarkdown reports whether a failed markdown send indicates the bot is not
+// permitted to use markdown at all (a stable condition worth latching), rather than
+// an unrelated 4xx that merely happened to surface on a markdown send.
+func disablesMarkdown(e *qq.APIError) bool {
+	switch e.Code {
+	case qqErrMsgDeduped:
+		return false
+	}
+	return true
+}
+
 // responder sends replies back to the single-chat (C2C) user a message came from.
 // It tracks the passive-reply sequence number required by the C2C send API.
 type responder struct {
@@ -64,15 +80,17 @@ func (r *responder) Send(ctx context.Context, text string) error {
 	err := r.sendOnce(ctx, text, useMarkdown)
 	if err != nil && useMarkdown {
 		// Always retry as plain text so the message is still delivered. Only disable
-		// markdown PROCESS-WIDE when the API itself rejected it (a 4xx APIError — e.g.
-		// passive markdown not approved); a transient network/5xx error must NOT
+		// markdown PROCESS-WIDE when the API rejected markdown ITSELF (the bot is not
+		// approved for native markdown — a stable condition worth latching). An
+		// unrelated 4xx that merely surfaced on a markdown send (e.g. msgseq dedup
+		// 40054005, rate limiting) or a transient network/5xx error must NOT
 		// permanently downgrade every future reply to plain text.
 		var apiErr *qq.APIError
-		if errors.As(err, &apiErr) && apiErr.HTTPStatus >= 400 && apiErr.HTTPStatus < 500 {
+		if errors.As(err, &apiErr) && apiErr.HTTPStatus >= 400 && apiErr.HTTPStatus < 500 && disablesMarkdown(apiErr) {
 			log.Printf("[gateway] markdown rejected by API (%v); falling back to plain text for the process", err)
 			markdownDisabled.Store(true)
 		} else {
-			log.Printf("[gateway] markdown send failed transiently (%v); retrying as text (markdown stays enabled)", err)
+			log.Printf("[gateway] markdown send failed (%v); retrying as text (markdown stays enabled)", err)
 		}
 		err = r.sendOnce(ctx, text, false)
 	}
