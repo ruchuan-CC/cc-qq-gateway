@@ -651,35 +651,39 @@ var commandAliases = map[string]string{
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
-// helpCommand is one row of the /help table.
-type helpCommand struct{ group, cmd, desc string }
+// helpCommand is one command shown in the /help table.
+type helpCommand struct{ cmd, desc string }
 
-// helpCommands is the canonical command list rendered by /help, grouped by area.
+// helpCommands is the canonical command list rendered by /help. It is laid out as
+// a symmetric four-column table (指令|说明|指令|说明) split into two equal halves,
+// so keep the count even (currently 24 → 12 + 12) and descriptions short.
 var helpCommands = []helpCommand{
-	{"对话", "/new", "开启新对话（清空上下文）"},
-	{"对话", "/retry", "重做上一条消息"},
-	{"对话", "/stop", "中断当前任务"},
-	{"配置", "/model", "查看 / 切换模型"},
-	{"配置", "/think", "下一条深度思考"},
-	{"配置", "/dir", "查看 / 切换工作目录"},
-	{"配置", "/mode", "权限模式"},
-	{"Claude", "/agents", "后台子代理"},
-	{"Claude", "/mcp", "MCP 服务器"},
-	{"Claude", "/memory", "查看记忆 CLAUDE.md"},
-	{"Claude", "/doctor", "环境诊断"},
-	{"快捷", "/review", "代码评审"},
-	{"快捷", "/diff", "查看 git 改动"},
-	{"快捷", "/explain", "解释代码 / 内容"},
-	{"快捷", "/web", "联网搜索"},
-	{"快捷", "/init", "生成 CLAUDE.md"},
-	{"信息", "/usage", "用量额度"},
-	{"信息", "/cost", "上次花费"},
-	{"信息", "/status", "运行状态"},
-	{"信息", "/sessions", "活跃会话"},
-	{"信息", "/whoami", "我的 open_id"},
-	{"信息", "/version", "版本信息"},
-	{"信息", "/ping", "连通测试"},
-	{"信息", "/help", "显示本帮助"},
+	// left half (rows 1-12)
+	{"/new", "新对话"},
+	{"/retry", "重做上条"},
+	{"/stop", "中断任务"},
+	{"/model", "切换模型"},
+	{"/think", "深度思考"},
+	{"/dir", "工作目录"},
+	{"/mode", "权限模式"},
+	{"/agents", "子代理"},
+	{"/mcp", "MCP 服务"},
+	{"/memory", "查看记忆"},
+	{"/doctor", "环境诊断"},
+	{"/review", "代码评审"},
+	// right half (rows 1-12)
+	{"/diff", "git 改动"},
+	{"/explain", "解释内容"},
+	{"/web", "联网搜索"},
+	{"/init", "生成文档"},
+	{"/usage", "用量额度"},
+	{"/cost", "上次花费"},
+	{"/status", "运行状态"},
+	{"/sessions", "活跃会话"},
+	{"/whoami", "我的身份"},
+	{"/version", "版本信息"},
+	{"/ping", "连通测试"},
+	{"/help", "显示帮助"},
 }
 
 // helpText is the rendered /help message: a Markdown intro plus a monospace,
@@ -691,35 +695,22 @@ var helpCommands = []helpCommand{
 var helpText = buildHelpText()
 
 func buildHelpText() string {
-	headers := []string{"类别", "命令", "说明"}
-	rows := make([][]string, 0, len(helpCommands))
-	for _, c := range helpCommands {
-		rows = append(rows, []string{c.group, c.cmd, c.desc})
-	}
-	w := colWidths(headers, rows)
-
-	var b strings.Builder
-	b.WriteString("**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n```\n")
-	b.WriteString(tableRule(w, "┌", "┬", "┐") + "\n")
-	b.WriteString(tableRow(headers, w) + "\n")
-	b.WriteString(tableRule(w, "├", "┼", "┤") + "\n")
-	prev := ""
-	for i, c := range helpCommands {
-		// Separate groups with a rule and show the group label only on its first
-		// row, so the table stays scannable.
-		if i > 0 && c.group != prev {
-			b.WriteString(tableRule(w, "├", "┼", "┤") + "\n")
+	// Symmetric four columns: 指令 | 说明 | 指令 | 说明. Split the list into two
+	// equal halves down the middle, pairing row i of the left half with row i of
+	// the right half. The left column gets the extra row if the count is odd.
+	headers := []string{"指令", "说明", "指令", "说明"}
+	half := (len(helpCommands) + 1) / 2
+	rows := make([][]string, 0, half)
+	for i := 0; i < half; i++ {
+		left := helpCommands[i]
+		row := []string{left.cmd, left.desc, "", ""}
+		if j := i + half; j < len(helpCommands) {
+			row[2], row[3] = helpCommands[j].cmd, helpCommands[j].desc
 		}
-		label := c.group
-		if c.group == prev {
-			label = ""
-		}
-		b.WriteString(tableRow([]string{label, c.cmd, c.desc}, w) + "\n")
-		prev = c.group
+		rows = append(rows, row)
 	}
-	b.WriteString(tableRule(w, "└", "┴", "┘") + "\n```\n")
-	b.WriteString("中文别名也可用（如「新对话」「停止」「状态」「联网」）。")
-	return b.String()
+	return "**🤖 Claude Code · QQ** —— 直接说需求即可，命令可选：\n\n" +
+		renderTable(headers, rows)
 }
 
 // maxPassiveReplies is QQ's cap on passive replies per inbound message (the C2C
