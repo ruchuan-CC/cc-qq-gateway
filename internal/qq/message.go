@@ -9,6 +9,7 @@ import (
 const (
 	MsgTypeText     = 0
 	MsgTypeMarkdown = 2
+	MsgTypeArk      = 3
 	MsgTypeMedia    = 7
 )
 
@@ -17,6 +18,7 @@ type MessageRequest struct {
 	Content  string           `json:"content,omitempty"`
 	MsgType  int              `json:"msg_type"`
 	Markdown *MessageMarkdown `json:"markdown,omitempty"`
+	Ark      *MessageArk      `json:"ark,omitempty"`
 	Media    *MessageMedia    `json:"media,omitempty"`
 	EventID  string           `json:"event_id,omitempty"`
 	MsgID    string           `json:"msg_id,omitempty"`
