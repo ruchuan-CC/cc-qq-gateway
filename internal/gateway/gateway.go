@@ -682,6 +682,26 @@ var helpGroups = []helpGroup{
 	{"信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/status", "运行状态"}, {"/sessions", "活跃会话"}, {"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
 }
 
+// helpTableData returns the /help command list as a symmetric four-column table
+// (命令 | 说明 | 命令 | 说明): the flat command list split into two equal halves,
+// pairing row i of the left half with row i of the right half.
+func helpTableData() (headers []string, rows [][]string) {
+	var flat []helpCommand
+	for _, g := range helpGroups {
+		flat = append(flat, g.cmds...)
+	}
+	headers = []string{"命令", "说明", "命令", "说明"}
+	half := (len(flat) + 1) / 2
+	for i := 0; i < half; i++ {
+		row := []string{flat[i].cmd, flat[i].desc, "", ""}
+		if j := i + half; j < len(flat) {
+			row[2], row[3] = flat[j].cmd, flat[j].desc
+		}
+		rows = append(rows, row)
+	}
+	return headers, rows
+}
+
 // helpText is the rendered /help message: a Markdown intro plus a monospace,
 // box-drawn command table inside a fenced code block. QQ does NOT render GFM pipe
 // tables, but it does render code blocks in a monospace font, so an aligned ASCII
@@ -690,36 +710,22 @@ var helpGroups = []helpGroup{
 // by display width (CJK = 2 cells) so Chinese and ASCII line up. Built once.
 var helpText = buildHelpText()
 
-// sendHelp sends /help as a native ARK list card (template 23), falling back to
-// the plain text list if the ARK send fails (e.g. passive ARK isn't approved for
-// this bot in the console).
+// sendHelp sends /help as a rendered table IMAGE (a real bordered "spreadsheet"
+// grid — QQ can't render text tables), falling back to the plain text list if the
+// image can't be rendered (e.g. the CJK font is missing) or sent.
 func (g *Gateway) sendHelp(ctx context.Context, r *responder) {
-	if err := r.SendArk(ctx, buildHelpArk()); err != nil {
-		g.logger.Printf("[gateway] help ARK send failed (%v); falling back to text", err)
-		_ = r.Send(ctx, helpText)
-	}
-}
-
-// buildHelpArk renders the command list as an ARK template-23 card: a header plus
-// one list row per command ("命令  说明").
-func buildHelpArk() *qq.MessageArk {
-	var list []qq.ArkObj
-	for _, grp := range helpGroups {
-		for _, c := range grp.cmds {
-			list = append(list, qq.ArkObj{ObjKV: []qq.ArkObjKV{
-				{Key: "desc", Value: c.cmd + "  " + c.desc},
-				{Key: "link", Value: ""},
-			}})
+	headers, rows := helpTableData()
+	if err := os.MkdirAll(g.cfg.MediaDir, 0o755); err == nil {
+		path := filepath.Join(g.cfg.MediaDir, "help.png")
+		if err := renderTableImagePNG(g.cfg.FontPath, "Claude Code · QQ 命令", headers, rows, path); err != nil {
+			g.logger.Printf("[gateway] help image render failed (%v); falling back to text", err)
+		} else if err := r.SendMedia(ctx, qq.FileTypeImage, path, ""); err != nil {
+			g.logger.Printf("[gateway] help image send failed (%v); falling back to text", err)
+		} else {
+			return
 		}
 	}
-	return &qq.MessageArk{
-		TemplateID: qq.ArkTemplateList,
-		KV: []qq.ArkKV{
-			{Key: "#DESC#", Value: "Claude Code · QQ 命令"},
-			{Key: "#PROMPT#", Value: "Claude Code 命令菜单"},
-			{Key: "#LIST#", Obj: list},
-		},
-	}
+	_ = r.Send(ctx, helpText)
 }
 
 func buildHelpText() string {

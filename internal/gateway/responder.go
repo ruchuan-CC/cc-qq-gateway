@@ -121,24 +121,6 @@ func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) 
 	return err
 }
 
-// SendArk sends an ARK template-card message. Passive ARK may require console
-// approval; callers should fall back to a plain reply on error.
-func (r *responder) SendArk(ctx context.Context, ark *qq.MessageArk) error {
-	req := &qq.MessageRequest{
-		MsgSeq:  r.nextSeq(),
-		MsgType: qq.MsgTypeArk,
-		Ark:     ark,
-	}
-	if !r.active.Load() {
-		req.MsgID = r.msgID
-		if r.msgID == "" {
-			req.EventID = r.eventID
-		}
-	}
-	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
-	return err
-}
-
 // SendMedia uploads one media item (image/file/video/audio) and sends it to the
 // user. localPath is preferred when non-empty, else the URL is uploaded by ref.
 func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url string) error {

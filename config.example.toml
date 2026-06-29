@@ -73,6 +73,10 @@ max_reply_chars = 1800
 # Where inbound attachments are downloaded and outbound files are staged.
 # Default: <home>/.cc-qq/media
 media_dir = ""
+# CJK TrueType/OpenType font used to render table images (e.g. /help renders a
+# real bordered table as a PNG, since QQ can't display text tables). Default:
+# <home>/.cc-qq/fonts/cjk.ttf. If the file is missing, /help falls back to text.
+font_path = ""
 # Deliver replies too long for the 5-message passive-reply budget as an uploaded
 # file instead of truncating them.
 send_long_replies_as_file = true

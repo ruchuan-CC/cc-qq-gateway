@@ -14,27 +14,30 @@ func TestHelpCommandsAreReal(t *testing.T) {
 	}
 }
 
-// The /help ARK card must contain one list row per real command.
-func TestHelpArkListsAllCommands(t *testing.T) {
-	ark := buildHelpArk()
-	if ark.TemplateID != 23 {
-		t.Fatalf("help ARK template = %d, want 23", ark.TemplateID)
-	}
-	var list []string
-	for _, kv := range ark.KV {
-		if kv.Key == "#LIST#" {
-			for _, row := range kv.Obj {
-				if len(row.ObjKV) > 0 {
-					list = append(list, row.ObjKV[0].Value)
-				}
-			}
-		}
+// The /help table image must be built from every real command, in a 4-column
+// (命令|说明|命令|说明) layout.
+func TestHelpTableData(t *testing.T) {
+	headers, rows := helpTableData()
+	if len(headers) != 4 {
+		t.Fatalf("help table has %d columns, want 4", len(headers))
 	}
 	total := 0
 	for _, g := range helpGroups {
 		total += len(g.cmds)
 	}
-	if len(list) != total {
-		t.Fatalf("help ARK has %d rows, want %d", len(list), total)
+	cells := 0
+	for _, row := range rows {
+		for _, c := range []string{row[0], row[2]} { // the two command columns
+			if c == "" {
+				continue
+			}
+			cells++
+			if _, ok := commandAliases[c]; !ok {
+				t.Errorf("help table lists %q but it is not a real command", c)
+			}
+		}
+	}
+	if cells != total {
+		t.Errorf("help table has %d commands, want %d", cells, total)
 	}
 }
