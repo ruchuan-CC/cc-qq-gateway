@@ -11,18 +11,23 @@ import "strings"
 // would misalign columns; put emoji in the bold header/intro outside the fence.
 
 // colWidths returns the display width of each column, sized to the widest cell
-// (header or body) in that column.
+// (header or body) in that column. The column count is the widest of the header
+// and any row, so it works with nil headers (headerless KV tables).
 func colWidths(headers []string, rows [][]string) []int {
-	w := make([]int, len(headers))
+	n := len(headers)
+	for _, row := range rows {
+		if len(row) > n {
+			n = len(row)
+		}
+	}
+	w := make([]int, n)
 	for i, h := range headers {
 		w[i] = displayWidth(h)
 	}
 	for _, row := range rows {
 		for i, cell := range row {
-			if i < len(w) {
-				if cw := displayWidth(cell); cw > w[i] {
-					w[i] = cw
-				}
+			if cw := displayWidth(cell); cw > w[i] {
+				w[i] = cw
 			}
 		}
 	}
@@ -54,6 +59,25 @@ func tableRow(cells []string, w []int) string {
 		}
 		b.WriteString(" " + padDisplay(cell, cw) + " │")
 	}
+	return b.String()
+}
+
+// renderKV renders rows as a headerless box table (a clean key→value list) inside
+// a code fence. Used by the "show current value" command views. Returns "" if
+// there are no rows.
+func renderKV(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	w := colWidths(nil, rows)
+	var b strings.Builder
+	b.WriteString("```\n")
+	b.WriteString(tableRule(w, "┌", "┬", "┐") + "\n")
+	for _, row := range rows {
+		b.WriteString(tableRow(row, w) + "\n")
+	}
+	b.WriteString(tableRule(w, "└", "┴", "┘") + "\n")
+	b.WriteString("```")
 	return b.String()
 }
 

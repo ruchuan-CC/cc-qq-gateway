@@ -279,8 +279,8 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "status":
 		_ = r.Send(ctx, g.statusText(key))
 	case "whoami":
-		_ = r.Send(ctx, "**🪪 你的身份**\n"+r.identity()+
-			"\n\n把这个 open_id 填入配置的 `allowed_users` 即可锁定操作者。")
+		_ = r.Send(ctx, "**🪪 你的身份** · 私聊 (C2C)\n你的 open_id：\n```\n"+r.userOpenID+
+			"\n```\n把它填入配置 `allowed_users` 即可锁定操作者。")
 	case "version":
 		_ = r.Send(ctx, fmt.Sprintf("**🏷️ 版本** cc-qq-gateway v%s · 运行 %s", Version, g.uptime()))
 	case "ping":
@@ -309,11 +309,14 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		if cur == "" {
 			cur = g.bridge.DefaultModel()
 			if cur == "" {
-				cur = "default (CLI)"
+				cur = "CLI 默认"
 			}
-			cur += " (default)"
+			cur += "（默认）"
 		}
-		_ = r.Send(ctx, "**🧠 模型** `"+cur+"`\n切换：`/model <名称>`\n"+modelHint)
+		_ = r.Send(ctx, "**🧠 模型**\n\n"+renderKV([][]string{
+			{"当前", cur},
+			{"可选", "opus / sonnet / haiku / fable"},
+		})+"\n切换 `/model <名称>` · 恢复默认 `/model default`")
 		return
 	}
 	canon, ok := claude.NormalizeModel(arg)
@@ -337,11 +340,13 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 		if cur == "" {
 			cur = g.bridge.DefaultWorkDir()
 			if cur == "" {
-				cur = "(claude default)"
+				cur = "Claude 默认"
 			}
-			cur += " (default)"
+			cur += "（默认）"
 		}
-		_ = r.Send(ctx, "**📁 工作目录** `"+cur+"`\n切换：`/dir <路径>` · 恢复默认：`/dir default`")
+		_ = r.Send(ctx, "**📁 工作目录**\n\n"+renderKV([][]string{
+			{"当前", cur},
+		})+"\n切换 `/dir <路径>` · 恢复默认 `/dir default`")
 		return
 	}
 	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
@@ -359,9 +364,20 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 	if arg == "" {
 		cur := sess.GetMode()
 		if cur == "" {
-			cur = "默认（按网关配置）"
+			cur = "default"
 		}
-		_ = r.Send(ctx, "**🔐 权限模式** `"+cur+"`\n可选：`default` `plan` `acceptEdits` `bypass`\n用法：`/mode <名称>`")
+		modes := [][]string{
+			{"default", "按网关配置"},
+			{"plan", "只读规划"},
+			{"acceptEdits", "自动接受改动"},
+			{"bypass", "完全放行"},
+		}
+		for _, m := range modes {
+			if m[0] == cur {
+				m[1] += "（当前）"
+			}
+		}
+		_ = r.Send(ctx, "**🔐 权限模式**\n\n"+renderTable([]string{"模式", "说明"}, modes)+"\n切换 `/mode <名称>`")
 		return
 	}
 	norm := arg
