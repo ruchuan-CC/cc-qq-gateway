@@ -66,8 +66,9 @@ timeout_seconds = 7200
 
 [gateway]
 # Reset a conversation after this many idle minutes (starts a fresh Claude
-# session on the next message).
-session_idle_minutes = 30
+# session on the next message; the reset is announced to the user). 240 = a
+# thread survives lunch or a meeting without silently losing context.
+session_idle_minutes = 240
 # Split long replies into chunks of at most this many characters (QQ limit).
 max_reply_chars = 1800
 # Where inbound attachments are downloaded and outbound files are staged.

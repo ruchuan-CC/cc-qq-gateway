@@ -143,13 +143,15 @@ func (g *Gateway) materializeAttachments(ctx context.Context, key string, atts [
 	return b.String()
 }
 
-// writeReplyFile stages a long text reply as a Markdown file for upload.
+// writeReplyFile stages a long text reply as a Markdown file for upload. The
+// name is timestamped so a new long reply doesn't overwrite one still being
+// uploaded (or one the user may re-download from chat history later).
 func (g *Gateway) writeReplyFile(key, text string) (string, error) {
 	dir := filepath.Join(g.cfg.MediaDir, sanitize(key))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "reply.md")
+	path := filepath.Join(dir, time.Now().Format("reply-0102-150405.md"))
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
 	}

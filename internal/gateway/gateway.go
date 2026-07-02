@@ -5,6 +5,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -21,7 +22,7 @@ import (
 )
 
 // Version is the gateway build version, surfaced via /version.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Gateway is the central orchestrator.
 type Gateway struct {
@@ -172,6 +173,13 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, text string, atts 
 	}
 	key := r.conversationKey()
 	g.logger.Printf("[gateway] inbound %s — %s (attachments=%d)", key, r.identity(), len(atts))
+
+	// Surface an idle-TTL context reset that would otherwise be silent: the user
+	// continuing an hours-old thread deserves to know the old context is gone
+	// rather than getting confusingly amnesiac answers.
+	if g.sessions.Get(key).TakeIdleReset() {
+		_ = r.Send(ctx, fmt.Sprintf("🕰️ 距上次对话已超过 %d 分钟，已自动开启新上下文（旧话题请重新带上背景）。", g.cfg.SessionIdleMinutes))
+	}
 
 	// This inbound message opens a fresh passive-reply window, so flush any replies
 	// that a long-running turn couldn't deliver earlier (the next-message fallback
@@ -802,13 +810,16 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	defer ping.Stop()
 
 	// Apply a pending /think request, then download any attachments so Claude
-	// can read them as local files.
-	prompt := text
+	// can read them as local files. The attachment note is kept separate so
+	// /retry can replay the message WITH its attachments (the files persist on
+	// disk) instead of silently dropping them.
+	retryText := text
+	if note := g.materializeAttachments(turnCtx, key, atts); note != "" {
+		retryText = strings.TrimSpace(text + "\n\n" + note)
+	}
+	prompt := retryText
 	if sess.TakeThinkNext() {
 		prompt = "ultrathink\n\n" + prompt
-	}
-	if note := g.materializeAttachments(turnCtx, key, atts); note != "" {
-		prompt = strings.TrimSpace(prompt + "\n\n" + note)
 	}
 
 	if g.cfg.ThinkingMessage != "" {
@@ -849,7 +860,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 			g.logger.Printf("[gateway] [%s] cleared possibly-stale session id after error", key)
 		}
 		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
-		if turnCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(err, claude.ErrTurnTimeout) {
 			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。")
 		} else {
 			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Claude error): "+short(err.Error()))
@@ -874,7 +885,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		}
 	}
 	sess.IncTurn()
-	sess.RecordTurn(text, res.CostUSD, res.DurationMS)
+	sess.RecordTurn(retryText, res.CostUSD, res.DurationMS)
 	g.addUsage(res.CostUSD)
 
 	reply := strings.TrimSpace(res.Text)
@@ -916,6 +927,12 @@ func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
 	return nil
 }
 
+// errPassiveBudget marks a delivery that could not even start because earlier
+// sends on this inbound message (thinking notice, queue notice, long-turn ping,
+// pending flushes) already used up QQ's 5-passive-reply allowance. The caller
+// escalates exactly as for a failed send (active push, then queue).
+var errPassiveBudget = errors.New("passive-reply budget exhausted for this message")
+
 // deliver sends Claude's reply: extracts outbound media directives, sends the
 // text (as a file when it is too long to fit the passive-reply budget), then
 // delivers each media item — all within QQ's 5-passive-reply cap. It returns a
@@ -924,7 +941,19 @@ func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
 func (g *Gateway) deliver(ctx context.Context, r *responder, key, text string) error {
 	text, media := extractSendDirectives(text)
 
+	// The 5-reply cap is per inbound message, and this responder may already have
+	// spent part of it on notices (thinking message, queued notice, long-turn
+	// ping, pending flushes) — count what's actually left instead of assuming a
+	// fresh window. Active pushes are not subject to the per-message cap (they
+	// are quota'd monthly instead), so an active responder keeps the full budget
+	// as a chunk-count bound.
 	budget := maxPassiveReplies
+	if !r.Active() {
+		budget = maxPassiveReplies - r.SentCount()
+		if budget < 1 {
+			return errPassiveBudget
+		}
+	}
 	chunks := splitMessage(text, g.cfg.MaxReplyChars)
 	textBudget := budget - len(media)
 	if textBudget < 1 {

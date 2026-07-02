@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -17,6 +18,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrTurnTimeout marks a turn that was killed by the per-turn timeout
+// (Config.Timeout), as opposed to a crash or a user cancel. Callers detect it
+// with errors.Is to tell the user the task hit its time limit (and can be
+// resumed) instead of showing a raw "signal: killed".
+var ErrTurnTimeout = errors.New("claude turn timed out")
 
 // Config configures how the local Claude Code CLI is invoked.
 type Config struct {
@@ -234,6 +241,12 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 		return r, nil
 	}
 	remnant := &Result{SessionID: sessionID}
+	// The timeout fires on the context derived above, not on the caller's ctx —
+	// report it as the distinct condition it is (the process was SIGKILLed, so
+	// waitErr alone would just say "signal: killed").
+	if ctx.Err() == context.DeadlineExceeded {
+		return remnant, fmt.Errorf("%w after %s", ErrTurnTimeout, b.cfg.Timeout)
+	}
 	if scanErr != nil {
 		// The stream was cut short by a read error (e.g. a single event larger than the
 		// 8MB scanner cap). Report it plainly instead of letting it masquerade as a

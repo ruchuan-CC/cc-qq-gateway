@@ -59,13 +59,22 @@ type responder struct {
 	// by the gateway when building a responder (bound to the session's counter).
 	nextSeq func() int
 
-	// active, once set, switches sends from passive replies (bound to msgID, which
-	// QQ expires after ~5 minutes) to active pushes (msgID omitted). Used to deliver
-	// the result of a turn that outran the passive-reply window.
+	// active, once set, switches sends from passive replies (bound to msgID, whose
+	// window QQ closes after 60 minutes) to active pushes (msgID omitted). Used to
+	// deliver the result of a turn that outran the passive-reply window.
 	active atomic.Bool
+
+	// sent counts successful sends made through this responder (text and media).
+	// One responder corresponds to one inbound message, so this is exactly the
+	// portion of QQ's 5-passive-replies-per-message allowance already spent —
+	// notices included — letting deliver() budget what actually remains.
+	sent atomic.Int64
 
 	asMarkdown bool
 }
+
+// SentCount reports how many messages this responder has successfully sent.
+func (r *responder) SentCount() int { return int(r.sent.Load()) }
 
 // GoActive switches this responder to active-push mode for all subsequent sends.
 func (r *responder) GoActive() { r.active.Store(true) }
@@ -110,6 +119,8 @@ func (r *responder) Send(ctx context.Context, text string) error {
 	}
 	if err != nil {
 		log.Printf("[gateway] C2C send FAILED (active=%t) to open_id=%s: %v", r.active.Load(), r.userOpenID, err)
+	} else {
+		r.sent.Add(1)
 	}
 	return err
 }
@@ -156,7 +167,9 @@ func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url 
 	if !r.active.Load() {
 		req.MsgID = r.msgID
 	}
-	_, err = r.client.SendC2CMessage(ctx, r.userOpenID, req)
+	if _, err = r.client.SendC2CMessage(ctx, r.userOpenID, req); err == nil {
+		r.sent.Add(1)
+	}
 	return err
 }
 

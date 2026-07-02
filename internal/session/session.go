@@ -41,6 +41,7 @@ type Session struct {
 	lastCost   float64   // last turn cost (USD), for /cost
 	lastDurMS  int       // last turn duration (ms), for /cost
 	thinkNext  bool      // next turn uses extended thinking, set by /think
+	idleReset  bool      // an idle-TTL reset cleared the context since last checked
 	// claudeGen bumps every time the resumable session id is cleared (/new, idle
 	// reset). A turn captures it at start and only writes back its session id if the
 	// generation still matches, so a turn that finished at the same instant /new
@@ -125,6 +126,25 @@ func (s *Session) TakeThinkNext() bool {
 	defer s.ctrl.Unlock()
 	v := s.thinkNext
 	s.thinkNext = false
+	return v
+}
+
+// markIdleReset records that the idle TTL just cleared this conversation's
+// context, so the gateway can tell the user instead of resetting silently.
+// Only the Manager's idle path sets it — an explicit /new is not flagged.
+func (s *Session) markIdleReset() {
+	s.ctrl.Lock()
+	s.idleReset = true
+	s.ctrl.Unlock()
+}
+
+// TakeIdleReset reports whether an idle reset happened since the last check,
+// clearing the flag.
+func (s *Session) TakeIdleReset() bool {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	v := s.idleReset
+	s.idleReset = false
 	return v
 }
 
@@ -280,6 +300,11 @@ func (m *Manager) Get(key string) *Session {
 		return s
 	}
 	if m.idleTTL > 0 && now.Sub(s.LastActive) > m.idleTTL {
+		// Only flag when there was a live context to lose — resetting an already
+		// fresh session shouldn't nag the user.
+		if s.HasSession() {
+			s.markIdleReset()
+		}
 		s.ClearClaude()
 	}
 	s.LastActive = now
