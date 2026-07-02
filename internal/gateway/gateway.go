@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the gateway build version, surfaced via /version.
-const Version = "0.5.0"
+const Version = "0.5.1"
 
 // Gateway is the central orchestrator.
 type Gateway struct {
@@ -327,7 +327,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "sessions":
 		_ = r.Send(ctx, g.sessionsText())
 	case "help":
-		g.sendHelp(ctx, r)
+		g.sendHelp(ctx, r, arg)
 	default:
 		return false
 	}
@@ -943,8 +943,10 @@ var commandAliases = map[string]string{
 	"/help": "help", "/h": "help", "/?": "help", "帮助": "help", "菜单": "help",
 }
 
-// helpCommand is one command shown in /help.
-type helpCommand struct{ cmd, desc string }
+// helpCommand is one command shown in /help: desc is the few-character label
+// used inline by the compact view; detail is the fuller usage line the detailed
+// view shows (falls back to desc when empty).
+type helpCommand struct{ cmd, desc, detail string }
 
 // helpGroup is a labelled set of commands.
 type helpGroup struct {
@@ -953,45 +955,103 @@ type helpGroup struct {
 }
 
 // helpGroups is the canonical command list rendered by /help, grouped by area.
-// QQ can't render aligned tables (no monospace), so /help is rendered as an
-// emoji-anchored bold label per group followed by a Markdown list (one command per
-// line — a list is the only reliable per-line break on QQ). Groups are kept small so
-// each block is a clean, scannable unit with breathing room between them.
+// Descriptions are kept to a few characters so they read cleanly both inline
+// (compact view) and one-per-line (detailed view).
 var helpGroups = []helpGroup{
-	{"💬 对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}, {"/compact", "压缩上下文继续"}}},
-	{"⏪ 会话", []helpCommand{{"/resume", "恢复历史会话"}, {"/export", "导出对话记录"}, {"/sessions", "活跃会话"}, {"/status", "运行状态"}}},
-	{"⚙️ 配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}, {"/timeout", "单轮时限"}}},
-	{"🧩 Claude", []helpCommand{{"/agents", "后台子代理"}, {"/mcp", "MCP 服务器"}, {"/memory", "查看记忆"}, {"/doctor", "环境诊断"}}},
-	{"⚡ 快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "查看 git 改动"}, {"/explain", "解释代码/内容"}, {"/web", "联网搜索"}, {"/init", "生成 CLAUDE.md"}}},
-	{"📊 信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
+	{"💬 对话", []helpCommand{
+		{"/new", "新对话", "清空上下文，重新开始"},
+		{"/retry", "重试上条", "重新执行上一条消息"},
+		{"/stop", "中断任务", "停止正在运行的任务"},
+		{"/compact", "压缩续聊", "把长对话压成交接摘要后继续；/compact <侧重点> 可指定保留重点"},
+	}},
+	{"⏪ 会话", []helpCommand{
+		{"/resume", "恢复历史", "列出历史会话；/resume <序号或 id 前缀> 接回"},
+		{"/export", "导出记录", "把本会话导出为 Markdown 文件发给你"},
+		{"/sessions", "会话列表", "所有活跃会话一览"},
+		{"/status", "运行状态", "会话 / 模型 / 当前任务实时状态"},
+	}},
+	{"⚙️ 配置", []helpCommand{
+		{"/model", "切换模型", "看当前与可选模型；/model <全名> 切换，default 恢复"},
+		{"/think", "深度思考", "下一条回复用深度思考"},
+		{"/dir", "工作目录", "/dir <路径> 切换，default 恢复"},
+		{"/mode", "权限模式", "default / plan / acceptEdits / bypass"},
+		{"/timeout", "单轮时限", "/timeout <分钟> 设置本会话时限，default 恢复"},
+	}},
+	{"🧩 管理", []helpCommand{
+		{"/agents", "子代理", "列出可用的后台子代理"},
+		{"/mcp", "MCP", "列出配置的 MCP 服务器"},
+		{"/memory", "记忆", "查看加载的 CLAUDE.md 记忆"},
+		{"/doctor", "诊断", "环境健康检查（CLI / 认证 / 网关）"},
+	}},
+	{"⚡ 快捷", []helpCommand{
+		{"/review", "代码评审", "评审当前代码改动"},
+		{"/diff", "git 改动", "总结 git status 与 diff"},
+		{"/explain", "解释内容", "/explain <代码或问题>"},
+		{"/web", "联网搜索", "/web <问题>，给出带来源的答案"},
+		{"/init", "项目文档", "生成 / 更新项目 CLAUDE.md"},
+	}},
+	{"📊 信息", []helpCommand{
+		{"/usage", "额度", "订阅用量与重置时间"},
+		{"/cost", "花费", "上一条回复的耗时与成本"},
+		{"/whoami", "身份", "我的 open_id"},
+		{"/version", "版本", "网关版本与运行时长"},
+		{"/ping", "连通", "连通性测试"},
+		{"/help", "帮助", "/help 简版；/help all 本详细版"},
+	}},
 }
 
-// helpText is the /help message: a Markdown heading plus one bold-label paragraph
-// per command group. QQ private chat can't render real tables (no monospace, no
-// pipe tables / code blocks) and shows an uploaded .csv only as a downloadable file,
-// so a grouped inline list is the cleanest command menu that actually displays in
-// the chat. Built once.
-var helpText = buildHelpText()
+// helpText (compact, the /help default) fits the whole menu in one screen: one
+// list item per GROUP with its commands inline, separated by "·". helpFullText
+// (/help all) is the airy one-command-per-line version for reading descriptions.
+// QQ Markdown has no code blocks/tables/monospace and a bare newline is not a
+// reliable line break, so both views are built from bold labels + Markdown lists
+// — the only dependable per-line primitives. Built once.
+var (
+	helpText     = buildHelpText()
+	helpFullText = buildHelpFullText()
+)
 
-// sendHelp sends /help as a single inline message (the grouped command list).
-func (g *Gateway) sendHelp(ctx context.Context, r *responder) {
-	_ = r.Send(ctx, helpText)
+// sendHelp sends the command menu: compact by default, detailed for
+// "/help all" (and Chinese equivalents).
+func (g *Gateway) sendHelp(ctx context.Context, r *responder, arg string) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "all", "full", "详细", "全部", "更多":
+		_ = r.Send(ctx, helpFullText)
+	default:
+		_ = r.Send(ctx, helpText)
+	}
 }
 
 func buildHelpText() string {
-	// QQ Markdown supports headings/bold/lists but not code blocks or tables, and a
-	// bare "\n" is an unreliable line break — a LIST is the only dependable per-line
-	// break. So each group is a blank-line-separated block: an emoji-anchored bold
-	// label, then one "- /cmd — desc" list item per command. The blank line between
-	// groups gives clear spacing; the list gives each command its own clean line.
 	var b strings.Builder
-	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，无需命令。全部命令：")
+	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，命令只是辅助：\n")
+	for _, g := range helpGroups {
+		b.WriteString("\n- **" + g.title + "**　")
+		for i, c := range g.cmds {
+			if i > 0 {
+				b.WriteString(" · ")
+			}
+			b.WriteString(c.cmd + " " + c.desc)
+		}
+	}
+	b.WriteString("\n\n👉 详细版发 **/help all**")
+	return b.String()
+}
+
+func buildHelpFullText() string {
+	var b strings.Builder
+	b.WriteString("## 🤖 Claude Code · QQ · 全部命令\n\n可带参数的命令，不带参数发送就是查看当前状态：")
 	for _, g := range helpGroups {
 		b.WriteString("\n\n**" + g.title + "**")
 		for _, c := range g.cmds {
-			b.WriteString("\n- " + c.cmd + " — " + c.desc)
+			detail := c.detail
+			if detail == "" {
+				detail = c.desc
+			}
+			b.WriteString("\n- " + c.cmd + " — " + detail)
 		}
 	}
+	b.WriteString("\n\n返回简版发 **/help**")
 	return b.String()
 }
 
