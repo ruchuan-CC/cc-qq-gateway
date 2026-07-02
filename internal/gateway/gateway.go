@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the gateway build version, surfaced via /version.
-const Version = "0.5.1"
+const Version = "0.5.2"
 
 // Gateway is the central orchestrator.
 type Gateway struct {
@@ -523,8 +523,10 @@ func (g *Gateway) runShortcut(ctx context.Context, r *responder, key, name, tmpl
 	go g.runTurn(context.Background(), r, key, prompt, nil)
 }
 
-// cstZone displays reset times in China Standard Time for the operator.
-var cstZone = time.FixedZone("CST", 8*3600)
+// displayZone is the timezone for user-facing timestamps. The operator's
+// standing rule (2026-07-02): always show SERVER time (the server runs UTC), no
+// conversion to Beijing time.
+var displayZone = time.Local
 
 // runManaged runs a claude management subcommand and delivers its output. It
 // escalates like a turn reply (active push, then queue) so slow output is never
@@ -773,7 +775,7 @@ func (g *Gateway) usageText() string {
 		}
 		val := fmt.Sprintf("%.0f%%", w.Utilization)
 		if !w.ResetsAt.IsZero() {
-			val += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(cstZone).Format("01-02 15:04"))
+			val += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(displayZone).Format("01-02 15:04"))
 		}
 		rows = append(rows, [2]string{label, val})
 	}
