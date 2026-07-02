@@ -14,7 +14,10 @@ func TestConsumeStreamSuccess(t *testing.T) {
 	}, "\n")
 
 	var tools []string
-	res, sid, fallback := consumeStream(strings.NewReader(stream), func(t string) { tools = append(tools, t) })
+	res, sid, fallback, err := consumeStream(strings.NewReader(stream), func(t string) { tools = append(tools, t) })
+	if err != nil {
+		t.Fatalf("unexpected scan error: %v", err)
+	}
 
 	if res == nil {
 		t.Fatal("expected a terminal result event")
@@ -45,7 +48,7 @@ func TestConsumeStreamKilledKeepsSessionID(t *testing.T) {
 		// process killed here — no result event
 	}, "\n")
 
-	res, sid, _ := consumeStream(strings.NewReader(stream), nil)
+	res, sid, _, _ := consumeStream(strings.NewReader(stream), nil)
 	if res != nil {
 		t.Errorf("expected no result event, got %+v", res)
 	}
@@ -57,7 +60,7 @@ func TestConsumeStreamKilledKeepsSessionID(t *testing.T) {
 // Non-stream-json lines (e.g. an unexpected plain-JSON or text output) are kept as
 // a fallback so the caller can still salvage a reply.
 func TestConsumeStreamFallback(t *testing.T) {
-	res, _, fallback := consumeStream(strings.NewReader("not json at all\n"), nil)
+	res, _, fallback, _ := consumeStream(strings.NewReader("not json at all\n"), nil)
 	if res != nil {
 		t.Errorf("expected no result, got %+v", res)
 	}
@@ -68,7 +71,7 @@ func TestConsumeStreamFallback(t *testing.T) {
 
 func TestConsumeStreamResultError(t *testing.T) {
 	stream := `{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s","error":"hit the wall"}`
-	res, _, _ := consumeStream(strings.NewReader(stream), nil)
+	res, _, _, _ := consumeStream(strings.NewReader(stream), nil)
 	if res == nil || !res.IsError {
 		t.Fatalf("expected an error result, got %+v", res)
 	}

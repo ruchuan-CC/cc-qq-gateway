@@ -1,6 +1,9 @@
 package gateway
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Every command listed in /help must be a real, dispatchable alias so /help never
 // advertises a command that does nothing.
@@ -14,30 +17,18 @@ func TestHelpCommandsAreReal(t *testing.T) {
 	}
 }
 
-// The /help table image must be built from every real command, in a 4-column
-// (命令|说明|命令|说明) layout.
-func TestHelpTableData(t *testing.T) {
-	headers, rows := helpTableData()
-	if len(headers) != 4 {
-		t.Fatalf("help table has %d columns, want 4", len(headers))
-	}
-	total := 0
+// helpText is the single inline message /help sends: it must name every grouped
+// command (and its group label) so the rendered menu is complete.
+func TestHelpTextListsEveryCommand(t *testing.T) {
+	out := helpText
 	for _, g := range helpGroups {
-		total += len(g.cmds)
-	}
-	cells := 0
-	for _, row := range rows {
-		for _, c := range []string{row[0], row[2]} { // the two command columns
-			if c == "" {
-				continue
-			}
-			cells++
-			if _, ok := commandAliases[c]; !ok {
-				t.Errorf("help table lists %q but it is not a real command", c)
+		if !strings.Contains(out, g.title) {
+			t.Errorf("help text missing group label %q", g.title)
+		}
+		for _, c := range g.cmds {
+			if !strings.Contains(out, c.cmd) {
+				t.Errorf("help text missing command %q", c.cmd)
 			}
 		}
-	}
-	if cells != total {
-		t.Errorf("help table has %d commands, want %d", cells, total)
 	}
 }

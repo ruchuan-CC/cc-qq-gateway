@@ -11,10 +11,22 @@ func TestCleanContent(t *testing.T) {
 		"  <@987> what is <#42> ?":    "what is  ?",
 		"plain message":               "plain message",
 		"<emoji:4> hi <@!1> <@2> bye": "hi   bye",
+		"／help":                       "/help", // full-width slash folds to a command
+		"／model opus":                 "/model opus",
 	}
 	for in, want := range cases {
 		if got := cleanContent(in); got != want {
 			t.Errorf("cleanContent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// truncateRunes must never panic on a zero/negative budget (a tiny max_reply_chars
+// once underflowed the slice index).
+func TestTruncateRunesNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1, -100} {
+		if got := truncateRunes("hello world", n); got != "" {
+			t.Errorf("truncateRunes(_, %d) = %q, want empty", n, got)
 		}
 	}
 }

@@ -41,6 +41,11 @@ type Session struct {
 	lastCost   float64   // last turn cost (USD), for /cost
 	lastDurMS  int       // last turn duration (ms), for /cost
 	thinkNext  bool      // next turn uses extended thinking, set by /think
+	// claudeGen bumps every time the resumable session id is cleared (/new, idle
+	// reset). A turn captures it at start and only writes back its session id if the
+	// generation still matches, so a turn that finished at the same instant /new
+	// reset the conversation can't resurrect the just-cleared context.
+	claudeGen uint64
 
 	// pending holds replies that could not be delivered live (e.g. a long turn
 	// finished after QQ's passive-reply window expired and active push was
@@ -200,6 +205,28 @@ func (s *Session) GetSessionID() string {
 }
 func (s *Session) SetSessionID(v string) { s.ctrl.Lock(); s.ClaudeSessionID = v; s.ctrl.Unlock() }
 
+// ClaudeGen returns the current session generation (see the claudeGen field). A
+// turn captures it before running and passes it to SetSessionIDIfGen.
+func (s *Session) ClaudeGen() uint64 {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.claudeGen
+}
+
+// SetSessionIDIfGen sets the resumable session id only if the generation still
+// matches gen (the value captured at turn start). Returns false if the session was
+// reset mid-turn (/new, idle reset), in which case the cleared context is left
+// cleared instead of being revived by this late write.
+func (s *Session) SetSessionIDIfGen(v string, gen uint64) bool {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	if s.claudeGen != gen {
+		return false
+	}
+	s.ClaudeSessionID = v
+	return true
+}
+
 // IncTurn increments and returns the completed-turn count.
 func (s *Session) IncTurn() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); s.Turns++; return s.Turns }
 
@@ -218,6 +245,7 @@ func (s *Session) HasSession() bool {
 func (s *Session) ClearClaude() {
 	s.ctrl.Lock()
 	s.ClaudeSessionID = ""
+	s.claudeGen++
 	s.ctrl.Unlock()
 }
 

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -183,6 +184,19 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	// Run the turn in its own process group and, on cancel (timeout or /stop), kill
+	// the WHOLE group — not just claude, but every tool subprocess it spawned (a long
+	// Bash, an MCP server). Otherwise those would be orphaned and keep running.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // negative pid = the group
+		}
+		return nil
+	}
+	// Bound the post-cancel wait: if a lingering child still holds the stdout pipe
+	// open after the group is killed, don't let cmd.Wait() (and the turn) hang forever.
+	cmd.WaitDelay = 5 * time.Second
 	// Pass the prompt via stdin rather than as a trailing positional arg:
 	// variadic flags like --add-dir greedily consume following args, which would
 	// otherwise swallow the prompt and make the CLI think no input was given.
@@ -198,7 +212,7 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("claude start failed: %w (stderr: %s)", err, truncate(stderr.String(), 300))
 	}
 
-	result, sessionID, fallback := consumeStream(stdoutPipe, req.OnActivity)
+	result, sessionID, fallback, scanErr := consumeStream(stdoutPipe, req.OnActivity)
 	waitErr := cmd.Wait()
 
 	// A terminal result event is authoritative even if Wait later reports an error.
@@ -220,6 +234,12 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 		return r, nil
 	}
 	remnant := &Result{SessionID: sessionID}
+	if scanErr != nil {
+		// The stream was cut short by a read error (e.g. a single event larger than the
+		// 8MB scanner cap). Report it plainly instead of letting it masquerade as a
+		// silent "no result" / timeout.
+		return remnant, fmt.Errorf("claude output stream error: %w (stderr: %s)", scanErr, truncate(stderr.String(), 300))
+	}
 	if waitErr != nil {
 		return remnant, fmt.Errorf("claude run failed: %w (stderr: %s)", waitErr, truncate(stderr.String(), 500))
 	}
@@ -230,7 +250,7 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 // returns the terminal "result" event (nil if none arrived, e.g. the process was
 // killed mid-turn), the most recent session id seen, and any non-JSON lines as a
 // raw fallback. onActivity, when non-nil, is called for each tool a turn starts.
-func consumeStream(r io.Reader, onActivity func(string)) (*Result, string, []byte) {
+func consumeStream(r io.Reader, onActivity func(string)) (*Result, string, []byte, error) {
 	var (
 		result    *Result
 		sessionID string
@@ -274,7 +294,7 @@ func consumeStream(r io.Reader, onActivity func(string)) (*Result, string, []byt
 			}
 		}
 	}
-	return result, sessionID, fallback.Bytes()
+	return result, sessionID, fallback.Bytes(), sc.Err()
 }
 
 // toolNames extracts the names of any tool_use blocks in an assistant message's

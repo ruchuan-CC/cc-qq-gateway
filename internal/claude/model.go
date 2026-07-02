@@ -46,12 +46,29 @@ func NormalizeModel(s string) (string, bool) {
 		return "fable", true
 	}
 	// A single bare token we don't recognize might be a new alias/id the CLI knows —
-	// let it try. But multi-word text with spaces/parens is a display name we can't
-	// map, so reject it with guidance rather than wedging the conversation.
-	if !strings.ContainsAny(low, " \t()[]") {
+	// let it try, but only if it LOOKS like a model id (ASCII letters/digits/.-_). A
+	// stray word like "列表" (from "model 列表") or multi-word display text is not a
+	// model, so reject it with guidance rather than storing it and wedging the next turn.
+	if isModelToken(low) {
 		return raw, true
 	}
 	return "", false
+}
+
+// isModelToken reports whether s is shaped like a model id/alias: a single token of
+// ASCII letters, digits, dot, dash or underscore (no spaces, parens, or non-ASCII).
+func isModelToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // fullwidthToASCII folds the full-width punctuation/space that Chinese IMEs emit

@@ -66,10 +66,6 @@ type GatewayConfig struct {
 	// MediaDir is where inbound attachments are downloaded and outbound files are
 	// staged. Default: <home>/.cc-qq/media.
 	MediaDir string `toml:"media_dir"`
-	// FontPath is a CJK TrueType/OpenType font used to render table images (e.g.
-	// /help). Default: <home>/.cc-qq/fonts/cjk.ttf. If the file is missing, image
-	// tables are skipped and the command falls back to a text reply.
-	FontPath string `toml:"font_path"`
 	// SendLongRepliesAsFile, when true (default), delivers replies that exceed the
 	// passive-reply budget as an uploaded file instead of truncating them.
 	SendLongRepliesAsFile *bool `toml:"send_long_replies_as_file"`
@@ -122,6 +118,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Gateway.MaxReplyChars == 0 {
 		c.Gateway.MaxReplyChars = 1800
+	} else if c.Gateway.MaxReplyChars < 200 {
+		// Keep a sane floor: the deliver path subtracts a small header budget, so a
+		// tiny value would make chunking degenerate (and previously underflowed).
+		c.Gateway.MaxReplyChars = 200
 	}
 	if c.Gateway.MediaDir == "" {
 		home, err := os.UserHomeDir()
@@ -129,13 +129,6 @@ func (c *Config) applyDefaults() {
 			home = "/tmp"
 		}
 		c.Gateway.MediaDir = home + "/.cc-qq/media"
-	}
-	if c.Gateway.FontPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			home = "/home/claude"
-		}
-		c.Gateway.FontPath = home + "/.cc-qq/fonts/cjk.ttf"
 	}
 	if c.Gateway.SendLongRepliesAsFile == nil {
 		v := true

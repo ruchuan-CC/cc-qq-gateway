@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -186,6 +187,21 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, text string, atts 
 	go g.runTurn(context.Background(), r, key, text, atts)
 }
 
+// safeGo runs fn in a goroutine with a panic recover, so a panic in one command or
+// turn is logged and contained instead of crashing the whole gateway process (the
+// transport supervisor cannot recover a panic in a detached goroutine). label names
+// the work for the log line.
+func (g *Gateway) safeGo(label string, fn func()) {
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				g.logger.Printf("[gateway] PANIC in %s: %v\n%s", label, rec, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
 // flushPending delivers any replies queued from an earlier turn that outran the
 // passive-reply window. Delivered as passive replies to the current message, which
 // has a fresh window. Sent best-effort; a delivery failure re-queues nothing (the
@@ -214,12 +230,11 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 
 	canon, ok := commandAliases[name]
 	if !ok {
-		// Unknown slash-commands are reported rather than sent to Claude, so a
-		// typo doesn't silently turn into a prompt.
-		if strings.HasPrefix(name, "/") {
-			_ = r.Send(ctx, "❓ 未知命令 "+name+"，发送 **/help** 查看可用命令。")
-			return true
-		}
+		// Not a built-in gateway command: let the message reach Claude unchanged.
+		// This deliberately includes text that merely starts with "/" — a file path
+		// ("/etc/hosts 看看这个"), a pasted code snippet, or one of Claude Code's own
+		// slash commands — so the gateway behaves like using Claude Code directly
+		// instead of swallowing such input as an "unknown command".
 		return false
 	}
 
@@ -243,15 +258,15 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "mode":
 		g.cmdMode(ctx, r, key, arg)
 	case "usage":
-		go func() { _ = r.Send(context.Background(), g.usageText()) }()
+		g.safeGo("usage", func() { _ = r.Send(context.Background(), g.usageText()) })
 	case "mcp":
-		go g.runManaged(r, key, "🔌 MCP 服务器", "mcp", "list")
+		g.safeGo("mcp", func() { g.runManaged(r, key, "🔌 MCP 服务器", "mcp", "list") })
 	case "agents":
-		go g.runManaged(r, key, "🤖 子代理 (agents)", "agents", "--json")
+		g.safeGo("agents", func() { g.runManaged(r, key, "🤖 子代理 (agents)", "agents", "--json") })
 	case "memory":
-		go g.cmdMemory(r, key)
+		g.safeGo("memory", func() { g.cmdMemory(r, key) })
 	case "doctor":
-		go g.cmdDoctor(r, key)
+		g.safeGo("doctor", func() { g.cmdDoctor(r, key) })
 	case "think":
 		g.sessions.Get(key).SetThinkNext()
 		_ = r.Send(ctx, "🧠 **下一条回复将进行深度思考。**")
@@ -297,8 +312,32 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	return true
 }
 
-// modelHint lists the model names the CLI accepts, shown when a name is unknown.
-const modelHint = "可用：opus / sonnet / haiku / fable（或完整 id，如 claude-opus-4-8[1m]）。恢复默认：/model default"
+// modelFullNames are the switchable models on this account, listed by FULL id (no
+// short aliases). Fable 5 unlocked on this account and verified accepted by the
+// CLI 2026-07-02. Switch with `/model <full name>`.
+var modelFullNames = []string{
+	"claude-fable-5",
+	"claude-opus-4-8",
+	"claude-opus-4-8[1m]",
+	"claude-sonnet-5",
+	"claude-haiku-4-5",
+}
+
+// modelListLines renders modelFullNames as a bullet list for QQ markdown.
+func modelListLines() string {
+	var b strings.Builder
+	for _, m := range modelFullNames {
+		b.WriteString("- ")
+		b.WriteString(m)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// modelHint lists the switchable model full names, shown when a name is unknown.
+const modelHint = "可切换模型（用全名）：claude-fable-5 / claude-opus-4-8 / claude-opus-4-8[1m] / " +
+	"claude-sonnet-5 / claude-haiku-4-5。" +
+	"直接 /model <全名> 即可切换，如 /model claude-fable-5。恢复默认：/model default"
 
 // cmdModel shows or sets the per-conversation model override. The argument is
 // normalized to a value the CLI's --model accepts (display names like
@@ -317,8 +356,8 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		}
 		_ = r.Send(ctx, "## 🧠 模型\n\n"+kvLines([][2]string{
 			{"当前", cur},
-			{"可选", "opus / sonnet / haiku / fable"},
-		})+"\n\n切换：/model <名称>　恢复默认：/model default")
+		})+"\n\n**可切换模型（用全名）**\n"+modelListLines()+
+			"\n\n直接 /model <全名> 即可切换，如 **/model claude-fable-5**　恢复默认：/model default")
 		return
 	}
 	canon, ok := claude.NormalizeModel(arg)
@@ -672,74 +711,44 @@ type helpGroup struct {
 }
 
 // helpGroups is the canonical command list rendered by /help, grouped by area.
-// QQ can't render aligned tables (no monospace), so /help is a grouped Markdown
-// list with bold group labels — clean and scannable on QQ.
+// QQ can't render aligned tables (no monospace), so /help is rendered as an
+// emoji-anchored bold label per group followed by a Markdown list (one command per
+// line — a list is the only reliable per-line break on QQ). Groups are kept small so
+// each block is a clean, scannable unit with breathing room between them.
 var helpGroups = []helpGroup{
-	{"对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}}},
-	{"配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
-	{"Claude", []helpCommand{{"/agents", "后台子代理"}, {"/mcp", "MCP 服务器"}, {"/memory", "查看记忆"}, {"/doctor", "环境诊断"}}},
-	{"快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "查看 git 改动"}, {"/explain", "解释代码/内容"}, {"/web", "联网搜索"}, {"/init", "生成 CLAUDE.md"}}},
-	{"信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/status", "运行状态"}, {"/sessions", "活跃会话"}, {"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
+	{"💬 对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}}},
+	{"⚙️ 配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
+	{"🧩 Claude", []helpCommand{{"/agents", "后台子代理"}, {"/mcp", "MCP 服务器"}, {"/memory", "查看记忆"}, {"/doctor", "环境诊断"}}},
+	{"⚡ 快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "查看 git 改动"}, {"/explain", "解释代码/内容"}, {"/web", "联网搜索"}, {"/init", "生成 CLAUDE.md"}}},
+	{"📊 信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/status", "运行状态"}, {"/sessions", "活跃会话"}}},
+	{"👤 账号", []helpCommand{{"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
 }
 
-// helpTableData returns the /help command list as a symmetric four-column table
-// (命令 | 说明 | 命令 | 说明): the flat command list split into two equal halves,
-// pairing row i of the left half with row i of the right half.
-func helpTableData() (headers []string, rows [][]string) {
-	var flat []helpCommand
-	for _, g := range helpGroups {
-		flat = append(flat, g.cmds...)
-	}
-	headers = []string{"命令", "说明", "命令", "说明"}
-	half := (len(flat) + 1) / 2
-	for i := 0; i < half; i++ {
-		row := []string{flat[i].cmd, flat[i].desc, "", ""}
-		if j := i + half; j < len(flat) {
-			row[2], row[3] = flat[j].cmd, flat[j].desc
-		}
-		rows = append(rows, row)
-	}
-	return headers, rows
-}
-
-// helpText is the rendered /help message: a Markdown intro plus a monospace,
-// box-drawn command table inside a fenced code block. QQ does NOT render GFM pipe
-// tables, but it does render code blocks in a monospace font, so an aligned ASCII
-// table is the layout that actually looks like a table on QQ (and degrades to
-// still-readable framed text if markdown falls back to plain). Columns are padded
-// by display width (CJK = 2 cells) so Chinese and ASCII line up. Built once.
+// helpText is the /help message: a Markdown heading plus one bold-label paragraph
+// per command group. QQ private chat can't render real tables (no monospace, no
+// pipe tables / code blocks) and shows an uploaded .csv only as a downloadable file,
+// so a grouped inline list is the cleanest command menu that actually displays in
+// the chat. Built once.
 var helpText = buildHelpText()
 
-// sendHelp sends /help as a rendered table IMAGE (a real bordered "spreadsheet"
-// grid — QQ can't render text tables), falling back to the plain text list if the
-// image can't be rendered (e.g. the CJK font is missing) or sent.
+// sendHelp sends /help as a single inline message (the grouped command list).
 func (g *Gateway) sendHelp(ctx context.Context, r *responder) {
-	headers, rows := helpTableData()
-	if err := os.MkdirAll(g.cfg.MediaDir, 0o755); err == nil {
-		path := filepath.Join(g.cfg.MediaDir, "help.png")
-		if err := renderTableImagePNG(g.cfg.FontPath, "Claude Code · QQ 命令", headers, rows, path); err != nil {
-			g.logger.Printf("[gateway] help image render failed (%v); falling back to text", err)
-		} else if err := r.SendMedia(ctx, qq.FileTypeImage, path, ""); err != nil {
-			g.logger.Printf("[gateway] help image send failed (%v); falling back to text", err)
-		} else {
-			return
-		}
-	}
 	_ = r.Send(ctx, helpText)
 }
 
 func buildHelpText() string {
 	// QQ Markdown supports headings/bold/lists but not code blocks or tables, and a
-	// bare "\n" is an unreliable line break — so use a heading, then one bold-label
-	// paragraph per group separated by blank lines.
+	// bare "\n" is an unreliable line break — a LIST is the only dependable per-line
+	// break. So each group is a blank-line-separated block: an emoji-anchored bold
+	// label, then one "- /cmd — desc" list item per command. The blank line between
+	// groups gives clear spacing; the list gives each command its own clean line.
 	var b strings.Builder
-	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，下面命令可选：")
+	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，无需命令。全部命令：")
 	for _, g := range helpGroups {
-		parts := make([]string, 0, len(g.cmds))
+		b.WriteString("\n\n**" + g.title + "**")
 		for _, c := range g.cmds {
-			parts = append(parts, c.cmd+" "+c.desc)
+			b.WriteString("\n- " + c.cmd + " — " + c.desc)
 		}
-		b.WriteString("\n\n**【" + g.title + "】** " + strings.Join(parts, " · "))
 	}
 	return b.String()
 }
@@ -757,6 +766,15 @@ const longTurnNotice = 90 * time.Second
 // outbound media Claude asks to send.
 func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, atts []qq.MessageAttachment) {
 	sess := g.sessions.Get(key)
+	// Contain any panic in this turn: log it and tell the user, rather than letting it
+	// crash the whole gateway. Registered first so it runs last — after Unlock/EndTurn
+	// below have released the locks, making the user-facing Send safe.
+	defer func() {
+		if rec := recover(); rec != nil {
+			g.logger.Printf("[gateway] [%s] turn PANIC: %v\n%s", key, rec, debug.Stack())
+			_ = r.Send(context.Background(), "⚠️ 内部出错了（已记录日志）。请重试，或发送 /new 重开对话。")
+		}
+	}()
 	// Messages for one conversation are serialized by sess.Lock(); a message that
 	// arrives while a turn is in flight waits here. Tell the user it is queued so the
 	// wait doesn't look like a dropped message or a crash.
@@ -800,6 +818,10 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	}
 
 	resuming := sess.GetSessionID()
+	// Capture the session generation now; if /new (or an idle reset) clears the
+	// session while this turn runs, the generation changes and we won't write our
+	// session id back at the end (see SetSessionIDIfGen).
+	gen := sess.ClaudeGen()
 	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, resuming != "")
 	res, err := g.bridge.Run(turnCtx, claude.Request{
 		SessionID:      resuming,
@@ -847,7 +869,9 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		return
 	}
 	if res.SessionID != "" {
-		sess.SetSessionID(res.SessionID)
+		if !sess.SetSessionIDIfGen(res.SessionID, gen) {
+			g.logger.Printf("[gateway] [%s] session was reset mid-turn; leaving the cleared context cleared", key)
+		}
 	}
 	sess.IncTurn()
 	sess.RecordTurn(text, res.CostUSD, res.DurationMS)

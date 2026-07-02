@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
@@ -22,15 +23,24 @@ var markdownDisabled atomic.Bool
 // it must never latch the process-wide markdown downgrade.
 const qqErrMsgDeduped = 40054005
 
-// disablesMarkdown reports whether a failed markdown send indicates the bot is not
-// permitted to use markdown at all (a stable condition worth latching), rather than
-// an unrelated 4xx that merely happened to surface on a markdown send.
+// qqMarkdownNotEnabled is the QQ error code returned when the bot is not approved
+// to send markdown — the one stable condition that should latch the downgrade.
+const qqMarkdownNotEnabled = 11293
+
+// disablesMarkdown reports whether a failed markdown send indicates the bot is
+// genuinely not permitted to use markdown (a stable condition worth latching the
+// process-wide downgrade for). It uses a WHITELIST, not a blacklist: only the known
+// markdown-rejection code, or an error whose message explicitly names markdown,
+// latches. Every other 4xx (msgseq dedup, an expired passive window, rate limiting)
+// is transient and must NOT permanently downgrade every later reply to plain text.
 func disablesMarkdown(e *qq.APIError) bool {
 	switch e.Code {
 	case qqErrMsgDeduped:
 		return false
+	case qqMarkdownNotEnabled:
+		return true
 	}
-	return true
+	return strings.Contains(strings.ToLower(e.Message), "markdown")
 }
 
 // responder sends replies back to the single-chat (C2C) user a message came from.

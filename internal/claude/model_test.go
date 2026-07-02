@@ -32,6 +32,10 @@ func TestNormalizeModel(t *testing.T) {
 		// multi-word junk we can't map is rejected (so it never wedges the session)
 		{"the big smart one", "", false},
 		{"please use gpt-4 (turbo)", "", false},
+		// a stray non-ASCII word (e.g. from "model 列表") is NOT a model id and must be
+		// rejected, not stored and left to 404 on the next turn.
+		{"列表", "", false},
+		{"模型", "", false},
 	}
 	for _, c := range cases {
 		got, ok := NormalizeModel(c.in)

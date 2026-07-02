@@ -11,7 +11,13 @@ var mentionRe = regexp.MustCompile(`<@!?\d+>|<#\d+>|<emoji:\d+>`)
 // cleanContent strips bot mention markup and trims whitespace from inbound text.
 func cleanContent(s string) string {
 	s = mentionRe.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
+	s = strings.TrimSpace(s)
+	// Chinese IMEs often emit a full-width slash; fold a leading one so "／help" is
+	// still recognized as the "/help" command rather than silently sent to Claude.
+	if strings.HasPrefix(s, "／") {
+		s = "/" + strings.TrimPrefix(s, "／")
+	}
+	return s
 }
 
 // splitMessage breaks text into chunks of at most maxRunes runes, preferring to
@@ -73,6 +79,9 @@ func hardSplit(s string, maxRunes int) []string {
 }
 
 func truncateRunes(s string, maxRunes int) string {
+	if maxRunes < 0 {
+		maxRunes = 0
+	}
 	runes := []rune(s)
 	if len(runes) <= maxRunes {
 		return s
