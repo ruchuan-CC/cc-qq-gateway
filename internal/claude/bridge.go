@@ -77,6 +77,9 @@ func (b *Bridge) DefaultWorkDir() string { return b.cfg.WorkDir }
 // DefaultModel reports the bridge's configured model ("" means CLI default).
 func (b *Bridge) DefaultModel() string { return b.cfg.Model }
 
+// DefaultTimeout reports the configured per-turn timeout.
+func (b *Bridge) DefaultTimeout() time.Duration { return b.cfg.Timeout }
+
 // FullAuthority reports whether turns run with permission prompts disabled.
 func (b *Bridge) FullAuthority() bool { return b.cfg.DangerouslySkipPermissions }
 
@@ -114,6 +117,9 @@ type Request struct {
 	// PermissionMode overrides the configured permission handling for this turn:
 	// "default" | "plan" | "acceptEdits" | "bypass". Empty uses the config.
 	PermissionMode string
+	// Timeout, when >0, overrides Config.Timeout for this turn (per-conversation
+	// /timeout command).
+	Timeout time.Duration
 	// OnActivity, when set, is called with a short label each time the turn makes
 	// visible progress (a tool starts). Used for server-side progress logging so a
 	// long-running turn can be observed instead of looking dead. Called from the
@@ -140,7 +146,11 @@ type streamEvent struct {
 // resumed; otherwise a new session is started. The new/continued session id is
 // returned in Result.SessionID.
 func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.cfg.Timeout)
+	timeout := b.cfg.Timeout
+	if req.Timeout > 0 {
+		timeout = req.Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	model := b.cfg.Model
@@ -245,7 +255,7 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	// report it as the distinct condition it is (the process was SIGKILLed, so
 	// waitErr alone would just say "signal: killed").
 	if ctx.Err() == context.DeadlineExceeded {
-		return remnant, fmt.Errorf("%w after %s", ErrTurnTimeout, b.cfg.Timeout)
+		return remnant, fmt.Errorf("%w after %s", ErrTurnTimeout, timeout)
 	}
 	if scanErr != nil {
 		// The stream was cut short by a read error (e.g. a single event larger than the

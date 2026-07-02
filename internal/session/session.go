@@ -25,6 +25,9 @@ type Session struct {
 	Mode    string // permission mode: default|plan|acceptEdits|bypass
 	// Turns counts completed Claude turns in this conversation.
 	Turns int
+	// TimeoutMin, when >0, overrides the configured per-turn timeout (minutes)
+	// for this conversation, driven by /timeout.
+	TimeoutMin int
 
 	// mu serializes turns within this conversation so messages are processed in
 	// order and never concurrently.
@@ -42,6 +45,19 @@ type Session struct {
 	lastDurMS  int       // last turn duration (ms), for /cost
 	thinkNext  bool      // next turn uses extended thinking, set by /think
 	idleReset  bool      // an idle-TTL reset cleared the context since last checked
+	// seed, when non-empty, is prepended to the next fresh (non-resuming) turn's
+	// prompt — the handoff summary /compact produces so a compacted conversation
+	// continues with its context. Cleared once consumed.
+	seed string
+	// Tool-activity telemetry for the in-flight turn, fed by the bridge's
+	// OnActivity callback: what the turn is doing right now, for /status and the
+	// long-turn progress notices. Reset by BeginTurn.
+	lastTool   string
+	toolCalls  int
+	lastToolAt time.Time
+	// resumeChoices holds the session ids last shown by /resume (no argument), so
+	// a follow-up "/resume 2" can pick by number. Ephemeral; not persisted.
+	resumeChoices []string
 	// claudeGen bumps every time the resumable session id is cleared (/new, idle
 	// reset). A turn captures it at start and only writes back its session id if the
 	// generation still matches, so a turn that finished at the same instant /new
@@ -148,16 +164,97 @@ func (s *Session) TakeIdleReset() bool {
 	return v
 }
 
+// SetSeed stores a context seed (the /compact handoff summary) injected into the
+// next fresh turn. TakeSeed consumes it; PeekSeed inspects without consuming.
+func (s *Session) SetSeed(text string) {
+	s.ctrl.Lock()
+	s.seed = text
+	s.ctrl.Unlock()
+}
+
+// TakeSeed returns and clears the pending context seed.
+func (s *Session) TakeSeed() string {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	v := s.seed
+	s.seed = ""
+	return v
+}
+
+// PeekSeed returns the pending context seed without consuming it.
+func (s *Session) PeekSeed() string {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.seed
+}
+
+// GetTimeoutMin / SetTimeoutMin get/set the per-conversation turn-timeout
+// override in minutes (0 = use the configured default).
+func (s *Session) GetTimeoutMin() int  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.TimeoutMin }
+func (s *Session) SetTimeoutMin(v int) { s.ctrl.Lock(); s.TimeoutMin = v; s.ctrl.Unlock() }
+
+// NoteTool records that the in-flight turn started a tool, for progress
+// visibility (/status and the long-turn notices).
+func (s *Session) NoteTool(name string) {
+	s.ctrl.Lock()
+	s.lastTool = name
+	s.toolCalls++
+	s.lastToolAt = time.Now()
+	s.ctrl.Unlock()
+}
+
+// ToolActivity reports the in-flight turn's latest tool, how many tool calls it
+// has made, and when the last one started. Zero values when idle/no activity.
+func (s *Session) ToolActivity() (tool string, calls int, at time.Time) {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.lastTool, s.toolCalls, s.lastToolAt
+}
+
+// SetResumeChoices stores the session ids last listed by /resume, so the user
+// can pick one by number.
+func (s *Session) SetResumeChoices(ids []string) {
+	s.ctrl.Lock()
+	s.resumeChoices = ids
+	s.ctrl.Unlock()
+}
+
+// ResumeChoice returns the stored id for a 1-based pick, or "" when out of range.
+func (s *Session) ResumeChoice(n int) string {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	if n < 1 || n > len(s.resumeChoices) {
+		return ""
+	}
+	return s.resumeChoices[n-1]
+}
+
+// AttachSession switches this conversation to an existing Claude session id
+// (/resume). It bumps the generation so an in-flight turn from the previous
+// context can't write its session id over the one we just attached, and clears
+// any pending compact seed (the resumed session carries its own context).
+func (s *Session) AttachSession(id string) {
+	s.ctrl.Lock()
+	s.claudeGen++
+	s.ClaudeSessionID = id
+	s.seed = ""
+	s.ctrl.Unlock()
+}
+
 // Lock serializes a turn for this conversation.
 func (s *Session) Lock()   { s.mu.Lock() }
 func (s *Session) Unlock() { s.mu.Unlock() }
 
 // BeginTurn records the cancel func for the in-flight turn and marks it running.
+// The tool-activity telemetry restarts with the turn.
 func (s *Session) BeginTurn(cancel context.CancelFunc) {
 	s.ctrl.Lock()
 	s.cancel = cancel
 	s.running = true
 	s.startedAt = time.Now()
+	s.lastTool = ""
+	s.toolCalls = 0
+	s.lastToolAt = time.Time{}
 	s.ctrl.Unlock()
 }
 
@@ -271,9 +368,10 @@ func (s *Session) ClearClaude() {
 
 // Manager owns the set of live sessions.
 type Manager struct {
-	mu       sync.Mutex
-	sessions map[string]*Session
-	idleTTL  time.Duration
+	mu        sync.Mutex
+	sessions  map[string]*Session
+	idleTTL   time.Duration
+	statePath string // where SaveState/LoadState persist; "" disables
 }
 
 // NewManager creates a session manager. idleTTL is how long a session may be

@@ -57,6 +57,12 @@ func New(cfg *config.Config, logger *log.Logger) *App {
 		Timeout:                    cfg.ClaudeTimeout(),
 	})
 	sessions := session.NewManager(cfg.SessionIdleTTL())
+	sessions.SetStatePath(cfg.Gateway.StatePath)
+	if err := sessions.LoadState(); err != nil {
+		logger.Printf("[app] warning: could not restore session state: %v", err)
+	} else if cfg.Gateway.StatePath != "" {
+		logger.Printf("[app] session state restored from %s", cfg.Gateway.StatePath)
+	}
 	gw := gateway.New(client, bridge, sessions, cfg.Gateway, logger)
 
 	return &App{cfg: cfg, client: client, gw: gw, logger: logger}
@@ -76,6 +82,22 @@ func (a *App) Run(ctx context.Context) error {
 	if ns := a.gw.NewNotifyServer(); ns != nil {
 		go ns.Run(ctx)
 	}
+
+	// Persist session state on shutdown and periodically as a safety net (state
+	// is also saved after every durable change; this catches anything missed).
+	defer a.gw.SaveState()
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				a.gw.SaveState()
+			}
+		}
+	}()
 
 	const (
 		minDelay = 2 * time.Second

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ import (
 )
 
 // Version is the gateway build version, surfaced via /version.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 // Gateway is the central orchestrator.
 type Gateway struct {
@@ -216,6 +217,10 @@ func (g *Gateway) safeGo(label string, fn func()) {
 // next message will retry whatever this call leaves behind via re-queue below).
 func (g *Gateway) flushPending(ctx context.Context, r *responder, key string) {
 	pending := g.sessions.Get(key).TakePending()
+	if len(pending) == 0 {
+		return
+	}
+	defer g.persist()
 	for _, p := range pending {
 		if err := g.deliver(ctx, r, key, "⏮️ 稍早那条任务的结果：\n\n"+p); err != nil {
 			g.logger.Printf("[gateway] [%s] re-queueing pending reply (flush failed: %v)", key, err)
@@ -258,6 +263,7 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		// session id back, silently resurrecting the context we're trying to clear.
 		g.sessions.Get(key).CancelTurn()
 		g.sessions.Reset(key)
+		g.persist()
 		_ = r.Send(ctx, "✅ **已开启新对话**，上下文已清空。")
 	case "model":
 		g.cmdModel(ctx, r, key, arg)
@@ -278,6 +284,14 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	case "think":
 		g.sessions.Get(key).SetThinkNext()
 		_ = r.Send(ctx, "🧠 **下一条回复将进行深度思考。**")
+	case "timeout":
+		g.cmdTimeout(ctx, r, key, arg)
+	case "compact":
+		g.safeGo("compact", func() { g.cmdCompact(r, key, arg) })
+	case "export":
+		g.safeGo("export", func() { g.cmdExport(r, key) })
+	case "resume":
+		g.safeGo("resume", func() { g.cmdResume(r, key, arg) })
 	case "retry":
 		last := g.sessions.Get(key).LastPrompt()
 		if last == "" {
@@ -374,6 +388,7 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		return
 	}
 	sess.SetModel(canon)
+	g.persist()
 	if canon == "" {
 		_ = r.Send(ctx, "**🧠 模型** 已恢复默认。")
 		return
@@ -400,10 +415,12 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 	}
 	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
 		sess.SetWorkDir("")
+		g.persist()
 		_ = r.Send(ctx, "**📁 工作目录** 已恢复默认。")
 		return
 	}
 	sess.SetWorkDir(arg)
+	g.persist()
 	_ = r.Send(ctx, "📁 工作目录已切换为 **"+arg+"**")
 }
 
@@ -446,7 +463,38 @@ func (g *Gateway) cmdMode(ctx context.Context, r *responder, key, arg string) {
 		return
 	}
 	sess.SetMode(norm)
+	g.persist()
 	_ = r.Send(ctx, "🔐 权限模式已切换为 **"+norm+"**")
+}
+
+// cmdTimeout shows or sets the per-conversation turn-timeout override.
+func (g *Gateway) cmdTimeout(ctx context.Context, r *responder, key, arg string) {
+	sess := g.sessions.Get(key)
+	if strings.TrimSpace(arg) == "" {
+		cur := sess.GetTimeoutMin()
+		val := fmt.Sprintf("%d 分钟", cur)
+		if cur <= 0 {
+			val = fmt.Sprintf("%.0f 分钟（默认）", g.bridge.DefaultTimeout().Minutes())
+		}
+		_ = r.Send(ctx, "## ⏱️ 单轮任务时限\n\n"+kvLines([][2]string{
+			{"当前", val},
+		})+"\n\n设置：/timeout <分钟数>（如 /timeout 60）　恢复默认：/timeout default")
+		return
+	}
+	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") || arg == "默认" {
+		sess.SetTimeoutMin(0)
+		g.persist()
+		_ = r.Send(ctx, "**⏱️ 时限** 已恢复默认。")
+		return
+	}
+	min, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(arg), "m"))
+	if err != nil || min < 1 || min > 24*60 {
+		_ = r.Send(ctx, "⚠️ 请给一个 1–1440 的分钟数，如 /timeout 60。恢复默认：/timeout default")
+		return
+	}
+	sess.SetTimeoutMin(min)
+	g.persist()
+	_ = r.Send(ctx, fmt.Sprintf("⏱️ 单轮任务时限已设为 **%d 分钟**", min))
 }
 
 // promptShortcuts map a command to a canned prompt that invokes a Claude Code
@@ -478,7 +526,9 @@ func (g *Gateway) runShortcut(ctx context.Context, r *responder, key, name, tmpl
 // cstZone displays reset times in China Standard Time for the operator.
 var cstZone = time.FixedZone("CST", 8*3600)
 
-// runManaged runs a claude management subcommand and delivers its output.
+// runManaged runs a claude management subcommand and delivers its output. It
+// escalates like a turn reply (active push, then queue) so slow output is never
+// silently lost.
 func (g *Gateway) runManaged(r *responder, key, label string, args ...string) {
 	out, err := g.bridge.RunCLI(context.Background(), args...)
 	if out == "" {
@@ -488,7 +538,7 @@ func (g *Gateway) runManaged(r *responder, key, label string, args ...string) {
 			out = "（无输出）"
 		}
 	}
-	g.deliver(context.Background(), r, key, "**"+label+"**\n"+out)
+	g.deliverOrQueue(context.Background(), r, g.sessions.Get(key), key, "**"+label+"**\n"+out)
 }
 
 // cmdMemory shows the CLAUDE.md memory files Claude loads (global + project).
@@ -512,7 +562,7 @@ func (g *Gateway) cmdMemory(r *responder, key string) {
 	if !found {
 		b.WriteString("\n（暂无 CLAUDE.md 记忆文件；让我“记住…”即可创建）")
 	}
-	g.deliver(context.Background(), r, key, b.String())
+	g.deliverOrQueue(context.Background(), r, g.sessions.Get(key), key, b.String())
 }
 
 // cmdDoctor reports a practical environment health summary (claude doctor itself
@@ -533,6 +583,174 @@ func (g *Gateway) cmdDoctor(r *responder, key string) {
 		{"网关", "v" + Version + " · 运行 " + g.uptime()},
 		{"工具权限", authorityLabel(g.bridge.FullAuthority())},
 	}))
+}
+
+// persist saves all session state to disk (best-effort; failures are logged).
+// Called after any durable state change so a gateway restart loses nothing.
+func (g *Gateway) persist() {
+	if err := g.sessions.SaveState(); err != nil {
+		g.logger.Printf("[gateway] persist session state: %v", err)
+	}
+}
+
+// SaveState exposes session persistence for the app's shutdown/periodic hooks.
+func (g *Gateway) SaveState() { g.persist() }
+
+// compactPrompt asks Claude to produce the handoff summary /compact seeds the
+// fresh context with. The summary must be self-contained: the next turn starts
+// a brand-new session whose only link to the past is this text.
+const compactPrompt = `请把我们本次对话到目前为止的全部内容，压缩成一份详尽的中文交接摘要，供“新的你”无缝接手。必须包含：正在进行的任务及其当前进度、已经做过的关键操作和结论、重要的文件路径/命令/数据、我的偏好和约定、尚未完成的下一步。直接输出摘要正文，不要开场白和客套。`
+
+// cmdCompact compacts the conversation: it asks Claude (inside the current
+// session) for a handoff summary, then resets the Claude session and stores the
+// summary as a seed that is prepended to the next turn — the same effect as
+// Claude Code's /compact, reimplemented for print-mode turns.
+func (g *Gateway) cmdCompact(r *responder, key, focus string) {
+	ctx := context.Background()
+	sess := g.sessions.Get(key)
+	if sess.GetSessionID() == "" {
+		_ = r.Send(ctx, "ℹ️ 当前没有可压缩的上下文（新会话）。")
+		return
+	}
+	if sess.Running() {
+		_ = r.Send(ctx, "⏳ 有任务正在运行，等它结束后再 /compact。")
+		return
+	}
+	_ = r.Send(ctx, "🗜️ **正在压缩上下文……** 稍等，压缩完成后对话会以摘要继续。")
+
+	sess.Lock()
+	defer sess.Unlock()
+	turnCtx, cancel := context.WithCancel(ctx)
+	sess.BeginTurn(cancel)
+	defer func() {
+		sess.EndTurn()
+		cancel()
+	}()
+
+	prompt := compactPrompt
+	if strings.TrimSpace(focus) != "" {
+		prompt += "\n\n压缩时请特别保留与此相关的细节：" + focus
+	}
+	res, err := g.bridge.Run(turnCtx, claude.Request{
+		SessionID:      sess.GetSessionID(),
+		Prompt:         prompt,
+		Model:          sess.GetModel(),
+		WorkDir:        sess.GetWorkDir(),
+		PermissionMode: sess.GetMode(),
+		Timeout:        10 * time.Minute,
+	})
+	if err != nil || res == nil || res.IsError || strings.TrimSpace(res.Text) == "" {
+		detail := "无输出"
+		if err != nil {
+			detail = short(err.Error())
+		} else if res != nil && res.Text != "" {
+			detail = short(res.Text)
+		}
+		g.deliverOrQueue(ctx, r, sess, key, "⚠️ 压缩失败，原上下文保持不变："+detail)
+		return
+	}
+	summary := strings.TrimSpace(res.Text)
+	sess.ClearClaude()
+	sess.SetSeed(summary)
+	g.persist()
+	g.deliverOrQueue(ctx, r, sess, key,
+		fmt.Sprintf("✅ **上下文已压缩**（摘要 %d 字）。继续对话即可，我会带着摘要接着干；想丢弃摘要重新开始发 /new。", runeLen(summary)))
+}
+
+// cmdExport renders the current conversation's CLI transcript as Markdown and
+// delivers it as a file.
+func (g *Gateway) cmdExport(r *responder, key string) {
+	ctx := context.Background()
+	sess := g.sessions.Get(key)
+	sid := sess.GetSessionID()
+	if sid == "" {
+		_ = r.Send(ctx, "ℹ️ 当前是新会话，还没有可导出的内容。也可以先 /resume 连上历史会话再导出。")
+		return
+	}
+	workDir := sess.GetWorkDir()
+	if workDir == "" {
+		workDir = g.bridge.DefaultWorkDir()
+	}
+	path := filepath.Join(projectDir(workDir), sid+".jsonl")
+	md, count, err := renderTranscript(path, sid)
+	if err != nil {
+		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
+		return
+	}
+	dir := filepath.Join(g.cfg.MediaDir, sanitize(key))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
+		return
+	}
+	out := filepath.Join(dir, time.Now().Format("export-0102-150405.md"))
+	if err := os.WriteFile(out, []byte(md), 0o600); err != nil {
+		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
+		return
+	}
+	g.deliverOrQueue(ctx, r, sess, key,
+		fmt.Sprintf("📤 **对话已导出**（%d 条消息）\n\n@@QQ_FILE: %s", count, out))
+}
+
+// cmdResume lists recent Claude sessions (no argument) or re-attaches the
+// conversation to one picked by list number or id prefix — the same recovery
+// Claude Code's --resume gives in the terminal.
+func (g *Gateway) cmdResume(r *responder, key, arg string) {
+	ctx := context.Background()
+	sess := g.sessions.Get(key)
+	workDir := sess.GetWorkDir()
+	if workDir == "" {
+		workDir = g.bridge.DefaultWorkDir()
+	}
+	arg = strings.TrimSpace(arg)
+
+	if arg == "" {
+		infos, err := listSessions(workDir, 8)
+		if err != nil || len(infos) == 0 {
+			_ = r.Send(ctx, "ℹ️ 该工作目录下没有历史会话。")
+			return
+		}
+		cur := sess.GetSessionID()
+		ids := make([]string, 0, len(infos))
+		rows := make([][2]string, 0, len(infos))
+		for i, in := range infos {
+			ids = append(ids, in.ID)
+			mark := ""
+			if in.ID == cur {
+				mark = "（当前）"
+			}
+			rows = append(rows, [2]string{
+				fmt.Sprintf("%d.", i+1),
+				fmt.Sprintf("%s%s · %s · %s", truncateRunes(in.Title, 24), mark,
+					humanDur(time.Since(in.Modified))+"前", in.ID[:8]),
+			})
+		}
+		sess.SetResumeChoices(ids)
+		_ = r.Send(ctx, "## ⏪ 历史会话\n\n"+kvLines(rows)+"\n\n用 **/resume <序号>**（或 id 前缀）切换，如 /resume 2。")
+		return
+	}
+
+	var target string
+	if n, err := strconv.Atoi(arg); err == nil {
+		target = sess.ResumeChoice(n)
+		if target == "" {
+			_ = r.Send(ctx, "⚠️ 序号无效。先发 /resume 看列表，再 /resume <序号>。")
+			return
+		}
+	} else {
+		target = findSessionByPrefix(workDir, arg)
+		if target == "" {
+			_ = r.Send(ctx, "⚠️ 找不到（或匹配到多个）该 id 前缀的会话。先发 /resume 看列表。")
+			return
+		}
+	}
+	sess.CancelTurn()
+	sess.AttachSession(target)
+	g.persist()
+	title := sessionTitle(filepath.Join(projectDir(workDir), target+".jsonl"))
+	if title == "" {
+		title = target[:8]
+	}
+	_ = r.Send(ctx, fmt.Sprintf("⏪ **已切换到历史会话** %s（%s）。直接继续聊即可。", truncateRunes(title, 30), target[:8]))
 }
 
 func authorityLabel(full bool) string {
@@ -626,21 +844,32 @@ func (g *Gateway) statusText(key string) string {
 		authority = "完全（无需确认）"
 	}
 	running := "空闲"
-	if s.Running() {
-		running = "运行中"
-	}
 	if d := s.RunningFor(); d > 0 {
 		running = "运行中 · 已跑 " + d.Round(time.Second).String()
+		if tool, calls, _ := s.ToolActivity(); calls > 0 {
+			running += fmt.Sprintf(" · %d 次工具 · 正在用 %s", calls, tool)
+		}
+	} else if s.Running() {
+		running = "运行中"
 	}
-	return "## 📊 运行状态\n\n" + kvLines([][2]string{
+	timeout := fmt.Sprintf("%.0f 分钟", g.bridge.DefaultTimeout().Minutes())
+	if min := s.GetTimeoutMin(); min > 0 {
+		timeout = fmt.Sprintf("%d 分钟（本会话）", min)
+	}
+	rows := [][2]string{
 		{"会话", status},
 		{"模型", model},
 		{"目录", workDir},
 		{"权限", authority},
 		{"任务", running},
+		{"时限", timeout},
 		{"轮数", fmt.Sprintf("%d", s.TurnCount())},
 		{"运行", g.uptime() + " · v" + Version},
-	})
+	}
+	if s.PeekSeed() != "" {
+		rows = append(rows, [2]string{"待续", "有一份压缩摘要将随下一条消息生效"})
+	}
+	return "## 📊 运行状态\n\n" + kvLines(rows)
 }
 
 func (g *Gateway) uptime() string {
@@ -682,11 +911,16 @@ var commandAliases = map[string]string{
 	"/new": "new", "/reset": "new", "/clear": "new", "新对话": "new", "重置": "new", "清空": "new",
 	"/retry": "retry", "/redo": "retry", "重试": "retry", "重发": "retry",
 	"/stop": "stop", "/cancel": "stop", "/abort": "stop", "停止": "stop", "中断": "stop",
+	"/compact": "compact", "压缩": "compact", "压缩上下文": "compact",
+	// session recovery & export
+	"/resume": "resume", "/continue": "resume", "恢复": "resume", "恢复会话": "resume",
+	"/export": "export", "导出": "export", "导出对话": "export",
 	// configuration
 	"/model": "model", "模型": "model",
 	"/think": "think", "深度思考": "think", "思考": "think",
 	"/dir": "dir", "/cd": "dir", "/cwd": "dir", "/pwd": "dir", "目录": "dir",
 	"/mode": "mode", "权限": "mode", "模式": "mode",
+	"/timeout": "timeout", "时限": "timeout", "超时": "timeout",
 	// Claude Code management commands
 	"/agents": "agents", "/agent": "agents", "子代理": "agents", "代理": "agents",
 	"/mcp":    "mcp",
@@ -724,12 +958,12 @@ type helpGroup struct {
 // line — a list is the only reliable per-line break on QQ). Groups are kept small so
 // each block is a clean, scannable unit with breathing room between them.
 var helpGroups = []helpGroup{
-	{"💬 对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}}},
-	{"⚙️ 配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}}},
+	{"💬 对话", []helpCommand{{"/new", "新对话"}, {"/retry", "重做上一条"}, {"/stop", "中断任务"}, {"/compact", "压缩上下文继续"}}},
+	{"⏪ 会话", []helpCommand{{"/resume", "恢复历史会话"}, {"/export", "导出对话记录"}, {"/sessions", "活跃会话"}, {"/status", "运行状态"}}},
+	{"⚙️ 配置", []helpCommand{{"/model", "切换模型"}, {"/think", "深度思考"}, {"/dir", "工作目录"}, {"/mode", "权限模式"}, {"/timeout", "单轮时限"}}},
 	{"🧩 Claude", []helpCommand{{"/agents", "后台子代理"}, {"/mcp", "MCP 服务器"}, {"/memory", "查看记忆"}, {"/doctor", "环境诊断"}}},
 	{"⚡ 快捷", []helpCommand{{"/review", "代码评审"}, {"/diff", "查看 git 改动"}, {"/explain", "解释代码/内容"}, {"/web", "联网搜索"}, {"/init", "生成 CLAUDE.md"}}},
-	{"📊 信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/status", "运行状态"}, {"/sessions", "活跃会话"}}},
-	{"👤 账号", []helpCommand{{"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
+	{"📊 信息", []helpCommand{{"/usage", "用量额度"}, {"/cost", "上次花费"}, {"/whoami", "我的 open_id"}, {"/version", "版本信息"}, {"/ping", "连通测试"}, {"/help", "显示帮助"}}},
 }
 
 // helpText is the /help message: a Markdown heading plus one bold-label paragraph
@@ -765,9 +999,31 @@ func buildHelpText() string {
 // passive-reply window itself is 60 minutes).
 const maxPassiveReplies = 5
 
-// longTurnNotice is how long a turn runs before the gateway sends a single
-// "still working" reassurance. Kept well inside QQ's passive-reply window.
-const longTurnNotice = 90 * time.Second
+// longTurnNotice is how long a turn runs before the gateway sends a
+// "still working" reassurance; veryLongTurnNotice adds one more progress update
+// for genuinely long tasks. Two notices at most: the rest of the passive-reply
+// budget is reserved for the actual result. Both are well inside QQ's
+// 60-minute passive window.
+const (
+	longTurnNotice     = 90 * time.Second
+	veryLongTurnNotice = 10 * time.Minute
+)
+
+// progressNotice describes what a long-running turn is doing right now, using
+// the session's live tool telemetry — so the wait feels like watching Claude
+// Code work, not like a dead line.
+func progressNotice(sess *session.Session, elapsed time.Duration, more bool) string {
+	tool, calls, _ := sess.ToolActivity()
+	msg := fmt.Sprintf("🟡 还在干活（已 %s", elapsed.Round(time.Second))
+	if calls > 0 {
+		msg += fmt.Sprintf("，%d 次工具调用，正在用 %s", calls, tool)
+	}
+	msg += "）…结果一出来我就发你。"
+	if more {
+		msg += " 想中断可发 /stop。"
+	}
+	return msg
+}
 
 // runTurn executes one Claude Code turn for a conversation and sends the reply,
 // including any inbound attachments (downloaded for Claude to read) and any
@@ -800,14 +1056,21 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		cancel()
 	}()
 
-	// QQ passive replies are capped (5 per inbound message, ~5-minute window), so we
-	// can't truly heartbeat a long task. Send a single reassurance once a turn has
-	// clearly become long-running, so it doesn't look dead. One-shot; Stop() cancels
-	// it if the turn finishes first.
+	// QQ passive replies are capped (5 per inbound message), so we can't truly
+	// heartbeat a long task. Send at most two progress notices — an early one so
+	// the turn doesn't look dead, and a later one for genuinely long tasks — each
+	// reporting the turn's live tool activity. Started AFTER the queue wait above
+	// (the timers measure this turn's work, not time spent waiting for its
+	// predecessor). One-shot; Stop() cancels them if the turn finishes first.
+	turnStart := time.Now()
 	ping := time.AfterFunc(longTurnNotice, func() {
-		_ = r.Send(context.Background(), "🟡 还在干活，这条任务比较久，跑完我会把结果发来，稍等。")
+		_ = r.Send(context.Background(), progressNotice(sess, time.Since(turnStart), false))
 	})
 	defer ping.Stop()
+	ping2 := time.AfterFunc(veryLongTurnNotice, func() {
+		_ = r.Send(context.Background(), progressNotice(sess, time.Since(turnStart), true))
+	})
+	defer ping2.Stop()
 
 	// Apply a pending /think request, then download any attachments so Claude
 	// can read them as local files. The attachment note is kept separate so
@@ -822,25 +1085,42 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		prompt = "ultrathink\n\n" + prompt
 	}
 
+	resuming := sess.GetSessionID()
+	// A compact seed carries the previous context into this fresh session. Only a
+	// fresh turn consumes it (a resuming session already has its context); it is
+	// re-armed on failure below so an errored turn doesn't eat the summary.
+	seed := ""
+	if resuming == "" {
+		if seed = sess.TakeSeed(); seed != "" {
+			prompt = "以下是此前对话压缩后的交接摘要，请基于它无缝继续（不必复述摘要内容）：\n\n" + seed +
+				"\n\n---\n\n现在，操作者说：\n\n" + prompt
+		}
+	}
+
 	if g.cfg.ThinkingMessage != "" {
 		if err := r.Send(turnCtx, g.cfg.ThinkingMessage); err != nil {
 			g.logger.Printf("[gateway] send thinking message: %v", err)
 		}
 	}
 
-	resuming := sess.GetSessionID()
 	// Capture the session generation now; if /new (or an idle reset) clears the
 	// session while this turn runs, the generation changes and we won't write our
 	// session id back at the end (see SetSessionIDIfGen).
 	gen := sess.ClaudeGen()
-	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t)", key, resuming != "")
+	var timeout time.Duration
+	if min := sess.GetTimeoutMin(); min > 0 {
+		timeout = time.Duration(min) * time.Minute
+	}
+	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t seed=%t)", key, resuming != "", seed != "")
 	res, err := g.bridge.Run(turnCtx, claude.Request{
 		SessionID:      resuming,
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
 		WorkDir:        sess.GetWorkDir(),
 		PermissionMode: sess.GetMode(),
+		Timeout:        timeout,
 		OnActivity: func(tool string) {
+			sess.NoteTool(tool)
 			g.logger.Printf("[gateway] [%s] tool: %s", key, tool)
 		},
 	})
@@ -858,7 +1138,12 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		} else if resuming != "" {
 			sess.ClearClaude()
 			g.logger.Printf("[gateway] [%s] cleared possibly-stale session id after error", key)
+		} else if seed != "" && (res == nil || res.SessionID == "") {
+			// The seeded turn never took hold — re-arm the compact summary so the
+			// context it carries isn't lost to a transient failure.
+			sess.SetSeed(seed)
 		}
+		g.persist()
 		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
 		if errors.Is(err, claude.ErrTurnTimeout) {
 			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。")
@@ -887,6 +1172,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	sess.IncTurn()
 	sess.RecordTurn(retryText, res.CostUSD, res.DurationMS)
 	g.addUsage(res.CostUSD)
+	g.persist()
 
 	reply := strings.TrimSpace(res.Text)
 	if reply == "" {
@@ -920,6 +1206,7 @@ func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
 	r.GoActive()
 	if err := g.deliver(ctx, r, key, text); err != nil {
 		sess.QueuePending(text)
+		g.persist()
 		g.logger.Printf("[gateway] [%s] notify active push failed (%v); queued for next inbound", key, err)
 		return nil
 	}
@@ -1029,6 +1316,7 @@ func (g *Gateway) deliverOrQueue(ctx context.Context, r *responder, sess *sessio
 		return
 	} else {
 		sess.QueuePending(text)
+		g.persist()
 		g.logger.Printf("[gateway] [%s] active push unavailable (%v); queued for next inbound message", key, err)
 	}
 }

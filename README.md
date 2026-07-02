@@ -29,6 +29,18 @@ QQ user ──▶ QQ platform ──▶ (WebSocket or Webhook) ──▶ cc-qq-g
     of every push, with the key derived from your bot secret exactly per spec.
 - **Conversational sessions** — one resumable Claude Code session for the
   single-chat conversation, with idle-reset and in-order, non-overlapping turns.
+- **Persistent across restarts** — session state (the resumable Claude session
+  id, per-chat model/dir/mode/timeout overrides, queued replies, the `/compact`
+  seed) is saved to `state_path` and restored at startup, so an upgrade or crash
+  is invisible to the conversation.
+- **Session recovery & export** — `/resume` lists recent Claude sessions (by
+  title) and re-attaches to any of them; `/export` delivers the current
+  conversation as a readable Markdown transcript file; `/compact` compresses a
+  long context into a handoff summary and continues fresh — the terminal
+  workflow, over QQ.
+- **Live progress** — long turns report what they're doing (tool-call count and
+  the tool currently running) in the progress notices and `/status`, instead of
+  a silent wait.
 - **Single-chat (C2C) surface** — handles the C2C message plus the user/friend
   lifecycle events (`FRIEND_ADD`, `FRIEND_DEL`, `C2C_MSG_RECEIVE`,
   `C2C_MSG_REJECT`), all on the one `GROUP_AND_C2C_EVENT` (`1<<25`) intent. A new
@@ -125,6 +137,14 @@ aliases both work.
 | `/new` | Start a fresh conversation (clears context). |
 | `/retry` | Re-run your last message. |
 | `/stop` | Interrupt the running task. |
+| `/compact [focus]` | Compress the context into a handoff summary and continue fresh from it. |
+
+**Session recovery & export**
+| Command | What it does |
+| --- | --- |
+| `/resume` | List recent Claude sessions (titles + age); `/resume <n\|id-prefix>` re-attaches. |
+| `/export` | Deliver the current conversation as a Markdown transcript file. |
+| `/sessions` | Summarize all live conversations. |
 
 **Configuration**
 | Command | What it does |
@@ -133,6 +153,7 @@ aliases both work.
 | `/think` | Make the next reply use extended thinking. |
 | `/dir [path]` | Show / change / `default`-reset the working directory. |
 | `/mode [name]` | Permission mode: `default` / `plan` / `acceptEdits` / `bypass`. |
+| `/timeout [min]` | Show / set / `default`-reset this conversation's per-turn time limit. |
 
 **Claude Code management** (run the real CLI feature)
 | Command | What it does |
@@ -156,12 +177,14 @@ aliases both work.
 | --- | --- |
 | `/usage` | Subscription usage: 5-hour & 7-day windows (utilization + reset time), per-model, plan, token validity. |
 | `/cost` | Time and cost of the last reply. |
-| `/status` | Session, model, dir, mode, authority, turns, uptime. |
+| `/status` | Session, model, dir, mode, authority, live task activity, time limit, turns, uptime. |
+| `/whoami` `/version` `/ping` | Your open_id · gateway version · liveness check. |
 | `/help` | Capabilities + the command table. |
 
-Anything that isn't a recognized command is sent to Claude as a prompt. An
-unrecognized `/slash` token is reported instead of being forwarded, so typos
-don't silently become prompts.
+Anything that isn't a recognized command is sent to Claude as a prompt —
+including unknown `/slash` input (a file path, a pasted snippet, or one of
+Claude Code's own slash commands/skills), so the gateway behaves like using
+Claude Code directly instead of swallowing such input.
 
 ## Staying online
 

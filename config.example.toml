@@ -74,6 +74,11 @@ max_reply_chars = 1800
 # Where inbound attachments are downloaded and outbound files are staged.
 # Default: <home>/.cc-qq/media
 media_dir = ""
+# Where session state (resumable Claude session ids, per-chat model/dir/mode/
+# timeout overrides, queued replies, the /compact seed) is persisted so a gateway
+# restart or upgrade is invisible to the conversation. Default:
+# <home>/.cc-qq/state.json. Set to "none" to disable persistence.
+state_path = ""
 # Deliver replies too long for the 5-message passive-reply budget as an uploaded
 # file instead of truncating them.
 send_long_replies_as_file = true

@@ -15,6 +15,7 @@ func TestCommandAliasesResolveToKnownHandlers(t *testing.T) {
 		"review": true, "diff": true, "explain": true, "web": true, "init": true,
 		"usage": true, "cost": true, "status": true, "help": true,
 		"whoami": true, "sessions": true, "version": true, "ping": true,
+		"compact": true, "export": true, "resume": true, "timeout": true,
 	}
 	seen := map[string]bool{}
 	for alias, canon := range commandAliases {
@@ -36,6 +37,7 @@ func TestHelpTextListsCoreCommands(t *testing.T) {
 		"/new", "/retry", "/stop", "/model", "/think", "/dir", "/mode",
 		"/agents", "/mcp", "/memory", "/doctor", "/review", "/diff", "/explain", "/web", "/init",
 		"/usage", "/cost", "/status", "/help", "/whoami", "/sessions", "/version",
+		"/compact", "/export", "/resume", "/timeout",
 	} {
 		if !strings.Contains(helpText, want) {
 			t.Errorf("helpText missing %q", want)

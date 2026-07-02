@@ -66,6 +66,10 @@ type GatewayConfig struct {
 	// MediaDir is where inbound attachments are downloaded and outbound files are
 	// staged. Default: <home>/.cc-qq/media.
 	MediaDir string `toml:"media_dir"`
+	// StatePath is where session state (resumable Claude session ids, per-chat
+	// settings, queued replies) is persisted across restarts. Default:
+	// <home>/.cc-qq/state.json. Set to "none" to disable persistence.
+	StatePath string `toml:"state_path"`
 	// SendLongRepliesAsFile, when true (default), delivers replies that exceed the
 	// passive-reply budget as an uploaded file instead of truncating them.
 	SendLongRepliesAsFile *bool `toml:"send_long_replies_as_file"`
@@ -129,6 +133,16 @@ func (c *Config) applyDefaults() {
 			home = "/tmp"
 		}
 		c.Gateway.MediaDir = home + "/.cc-qq/media"
+	}
+	switch c.Gateway.StatePath {
+	case "":
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = "/tmp"
+		}
+		c.Gateway.StatePath = home + "/.cc-qq/state.json"
+	case "none", "off", "disabled":
+		c.Gateway.StatePath = ""
 	}
 	if c.Gateway.SendLongRepliesAsFile == nil {
 		v := true
