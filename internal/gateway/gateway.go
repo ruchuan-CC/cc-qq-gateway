@@ -1,5 +1,5 @@
-// Package gateway wires QQ Bot events to a local Claude Code session and routes
-// Claude's replies back to the originating QQ conversation.
+// Package gateway wires QQ Bot events to a local Codex CLI session and routes
+// Codex replies back to the originating QQ conversation.
 package gateway
 
 import (
@@ -8,15 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-qq-gateway/internal/claude"
+	"github.com/chenhg5/cc-qq-gateway/internal/codex"
 	"github.com/chenhg5/cc-qq-gateway/internal/config"
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
 	"github.com/chenhg5/cc-qq-gateway/internal/session"
@@ -28,7 +25,7 @@ const Version = "0.6.0"
 // Gateway is the central orchestrator.
 type Gateway struct {
 	client   *qq.Client
-	bridge   *claude.Bridge
+	bridge   *codex.Bridge
 	sessions *session.Manager
 	cfg      config.GatewayConfig
 	logger   *log.Logger
@@ -36,28 +33,10 @@ type Gateway struct {
 	allowedUsers map[string]bool
 
 	startedAt time.Time
-
-	usageMu    sync.Mutex
-	totalTurns int
-	totalCost  float64
-}
-
-// addUsage accumulates process-wide usage for the /usage command.
-func (g *Gateway) addUsage(costUSD float64) {
-	g.usageMu.Lock()
-	g.totalTurns++
-	g.totalCost += costUSD
-	g.usageMu.Unlock()
-}
-
-func (g *Gateway) usageSnapshot() (int, float64) {
-	g.usageMu.Lock()
-	defer g.usageMu.Unlock()
-	return g.totalTurns, g.totalCost
 }
 
 // New builds a Gateway.
-func New(client *qq.Client, bridge *claude.Bridge, sessions *session.Manager, cfg config.GatewayConfig, logger *log.Logger) *Gateway {
+func New(client *qq.Client, bridge *codex.Bridge, sessions *session.Manager, cfg config.GatewayConfig, logger *log.Logger) *Gateway {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -127,7 +106,7 @@ func (g *Gateway) HandleEvent(ctx context.Context, p *qq.Payload) {
 }
 
 // welcomeText greets a user who just added the bot / re-enabled push.
-const welcomeText = "**👋 你好，我是 Claude Code。**\n直接把需求发给我即可——写代码、查资料、读图片/文件都行。\n发送 **/help** 查看全部命令。"
+const welcomeText = "**👋 你好，我是 Codex。**\n直接把需求发给我即可：写代码、查资料、读图片/文件都行。\n发送 **/help** 查看全部命令。"
 
 // handleFriendEvent records a single-chat user/friend lifecycle event and, when
 // greet is set and the transport provided an event_id (webhook only), sends a
@@ -165,7 +144,7 @@ func (g *Gateway) handleFriendEvent(ctx context.Context, p *qq.Payload, greet bo
 	}
 }
 
-// dispatch handles slash-commands inline and otherwise runs a Claude turn in a
+// dispatch handles slash-commands inline and otherwise runs a Codex turn in a
 // goroutine so the event loop is never blocked.
 func (g *Gateway) dispatch(ctx context.Context, r *responder, text string, atts []qq.MessageAttachment) {
 	text = strings.TrimSpace(text)
@@ -232,7 +211,7 @@ func (g *Gateway) flushPending(ctx context.Context, r *responder, key string) {
 
 // handleCommand processes built-in control commands. A command is any message
 // whose first token starts with "/" (or a recognized Chinese alias). Returns
-// true if the message was handled as a command (and thus must not reach Claude).
+// true if the message was handled as a command (and thus must not reach Codex).
 func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text string) bool {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
@@ -243,15 +222,15 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 
 	canon, ok := commandAliases[name]
 	if !ok {
-		// Not a built-in gateway command: let the message reach Claude unchanged.
+		// Not a built-in gateway command: let the message reach Codex unchanged.
 		// This deliberately includes text that merely starts with "/" — a file path
-		// ("/etc/hosts 看看这个"), a pasted code snippet, or one of Claude Code's own
-		// slash commands — so the gateway behaves like using Claude Code directly
+		// ("/etc/hosts 看看这个"), a pasted code snippet, or one of Codex's own
+		// slash commands — so the gateway behaves like using Codex directly
 		// instead of swallowing such input as an "unknown command".
 		return false
 	}
 
-	// Feature shortcuts run a Claude turn with a canned prompt.
+	// Feature shortcuts run a Codex turn with a canned prompt.
 	if tmpl, ok := promptShortcuts[canon]; ok {
 		g.runShortcut(ctx, r, key, canon, tmpl, arg)
 		return true
@@ -273,25 +252,17 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		g.cmdCwd(ctx, r, key, arg)
 	case "mode":
 		g.cmdMode(ctx, r, key, arg)
-	case "usage":
-		g.safeGo("usage", func() { _ = r.Send(context.Background(), g.usageText()) })
 	case "mcp":
-		g.safeGo("mcp", func() { g.runManaged(r, key, "🔌 MCP 服务器", "mcp", "list") })
-	case "agents":
-		g.safeGo("agents", func() { g.runManaged(r, key, "🤖 子代理 (agents)", "agents", "--json") })
-	case "memory":
-		g.safeGo("memory", func() { g.cmdMemory(r, key) })
+		g.safeGo("mcp", func() { g.runManaged(r, key, "🔌 Codex MCP", "mcp", "list") })
 	case "doctor":
 		g.safeGo("doctor", func() { g.cmdDoctor(r, key) })
 	case "think":
 		g.sessions.Get(key).SetThinkNext()
-		_ = r.Send(ctx, "🧠 **下一条回复将进行深度思考。**")
+		_ = r.Send(ctx, "🧠 **下一条回复将使用 xhigh 思考强度。**")
 	case "timeout":
 		g.cmdTimeout(ctx, r, key, arg)
 	case "compact":
 		g.safeGo("compact", func() { g.cmdCompact(r, key, arg) })
-	case "export":
-		g.safeGo("export", func() { g.cmdExport(r, key) })
 	case "resume":
 		g.safeGo("resume", func() { g.cmdResume(r, key, arg) })
 	case "retry":
@@ -302,13 +273,6 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 			_ = r.Send(ctx, "🔁 **重新执行上一条…**")
 			go g.runTurn(context.Background(), r, key, last, nil)
 		}
-	case "cost":
-		cost, dur := g.sessions.Get(key).LastStats()
-		if cost == 0 && dur == 0 {
-			_ = r.Send(ctx, "ℹ️ 还没有可统计的回复。")
-		} else {
-			_ = r.Send(ctx, fmt.Sprintf("**💰 上次回复** 用时 %.1fs · 花费 $%.4f", float64(dur)/1000, cost))
-		}
 	case "stop":
 		if g.sessions.Get(key).CancelTurn() {
 			_ = r.Send(ctx, "🛑 **正在中断当前任务。**")
@@ -317,6 +281,8 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		}
 	case "status":
 		_ = r.Send(ctx, g.statusText(key))
+	case "usage":
+		g.safeGo("usage", func() { g.cmdUsage(r, key) })
 	case "whoami":
 		_ = r.Send(ctx, "## 🪪 你的身份\n\n"+kvLines([][2]string{
 			{"类型", "私聊 (C2C)"},
@@ -336,37 +302,11 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 	return true
 }
 
-// modelFullNames are the switchable models on this account, listed by FULL id (no
-// short aliases). Fable 5 unlocked on this account and verified accepted by the
-// CLI 2026-07-02. Switch with `/model <full name>`.
-var modelFullNames = []string{
-	"claude-fable-5",
-	"claude-opus-4-8",
-	"claude-opus-4-8[1m]",
-	"claude-sonnet-5",
-	"claude-haiku-4-5",
-}
-
-// modelListLines renders modelFullNames as a bullet list for QQ markdown.
-func modelListLines() string {
-	var b strings.Builder
-	for _, m := range modelFullNames {
-		b.WriteString("- ")
-		b.WriteString(m)
-		b.WriteString("\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// modelHint lists the switchable model full names, shown when a name is unknown.
-const modelHint = "可切换模型（用全名）：claude-fable-5 / claude-opus-4-8 / claude-opus-4-8[1m] / " +
-	"claude-sonnet-5 / claude-haiku-4-5。" +
-	"直接 /model <全名> 即可切换，如 /model claude-fable-5。恢复默认：/model default"
+const modelHint = "请输入 Codex 可用的模型 id，例如 gpt-5.5；恢复默认：/model default"
 
 // cmdModel shows or sets the per-conversation model override. The argument is
-// normalized to a value the CLI's --model accepts (display names like
-// "Opus 4.8 (1M context)" are translated, not passed through), and an
-// unrecognized name is rejected instead of being stored and wedging every turn.
+// normalized to a value the CLI's --model accepts. Unknown single-token ids are
+// allowed through so new Codex models work without a gateway release.
 func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
 	arg = strings.TrimSpace(arg)
@@ -396,12 +336,11 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		_ = r.Send(ctx, "## 🧠 模型\n\n"+kvLines([][2]string{
 			{"当前模型", cur},
 			{"思考强度", eff},
-		})+"\n\n**可切换模型（用全名）**\n"+modelListLines()+
-			"\n\n切换模型：/model <全名>，如 **/model claude-fable-5**（default 恢复默认）"+
-			"\n设置强度：**/effort <low|medium|high|xhigh|max>**（default 恢复默认）")
+		})+"\n\n切换模型：/model <模型 id>，如 **/model gpt-5.5**（default 恢复默认）"+
+			"\n设置强度：**/effort <minimal|low|medium|high|xhigh>**（default 恢复默认）")
 		return
 	}
-	canon, ok := claude.NormalizeModel(arg)
+	canon, ok := codex.NormalizeModel(arg)
 	if !ok {
 		_ = r.Send(ctx, "⚠️ 无法识别的模型名 "+arg+"。\n\n"+modelHint)
 		return
@@ -415,9 +354,8 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 	_ = r.Send(ctx, "🧠 模型已切换为 **"+canon+"**")
 }
 
-// cmdEffort shows or sets the per-conversation reasoning-effort override, wired
-// to the Claude CLI's --effort flag (low/medium/high/xhigh/max). Empty/"default"
-// clears it back to the CLI default.
+// cmdEffort shows or sets the per-conversation Codex reasoning-effort override.
+// Empty/"default" clears it back to the CLI default.
 func (g *Gateway) cmdEffort(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
 	arg = strings.TrimSpace(arg)
@@ -432,12 +370,12 @@ func (g *Gateway) cmdEffort(ctx context.Context, r *responder, key, arg string) 
 		}
 		_ = r.Send(ctx, "## ⚙️ 思考强度 · effort\n\n"+kvLines([][2]string{
 			{"当前", cur},
-		})+"\n\n可选等级：low / medium / high / xhigh / max\n设置：/effort <等级>（或 /model effort <等级>）　恢复默认：/effort default")
+		})+"\n\n可选等级：minimal / low / medium / high / xhigh\n设置：/effort <等级>（或 /model effort <等级>）　恢复默认：/effort default")
 		return
 	}
-	lvl, ok := claude.NormalizeEffort(arg)
+	lvl, ok := codex.NormalizeEffort(arg)
 	if !ok {
-		_ = r.Send(ctx, "⚠️ 无法识别的强度 "+arg+"。可选：low / medium / high / xhigh / max（default 恢复默认）")
+		_ = r.Send(ctx, "⚠️ 无法识别的强度 "+arg+"。可选：minimal / low / medium / high / xhigh（default 恢复默认）")
 		return
 	}
 	sess.SetEffort(lvl)
@@ -457,7 +395,7 @@ func (g *Gateway) cmdCwd(ctx context.Context, r *responder, key, arg string) {
 		if cur == "" {
 			cur = g.bridge.DefaultWorkDir()
 			if cur == "" {
-				cur = "Claude 默认"
+				cur = "Codex 默认"
 			}
 			cur += "（默认）"
 		}
@@ -550,12 +488,12 @@ func (g *Gateway) cmdTimeout(ctx context.Context, r *responder, key, arg string)
 	_ = r.Send(ctx, fmt.Sprintf("⏱️ 单轮任务时限已设为 **%d 分钟**", min))
 }
 
-// promptShortcuts map a command to a canned prompt that invokes a Claude Code
+// promptShortcuts map a command to a canned prompt that invokes a Codex
 // capability. Commands in argShortcuts require an argument.
 var promptShortcuts = map[string]string{
 	"review":  "Review the current code changes (git diff against HEAD) for bugs, risks, and improvements. Be concise and concrete.",
 	"diff":    "Run `git status` and `git diff` in the working directory and give me a concise summary of the current changes.",
-	"init":    "Create or update a CLAUDE.md in the working directory that documents this project for future Claude Code sessions.",
+	"init":    "Create or update an AGENTS.md in the working directory that documents this project for future Codex sessions.",
 	"explain": "Explain the following clearly and concisely:",
 	"web":     "Search the web and give a concise, sourced answer for:",
 }
@@ -563,7 +501,7 @@ var promptShortcuts = map[string]string{
 // argShortcuts require a trailing argument.
 var argShortcuts = map[string]bool{"explain": true, "web": true}
 
-// runShortcut launches a Claude turn from a feature-shortcut command.
+// runShortcut launches a Codex turn from a feature-shortcut command.
 func (g *Gateway) runShortcut(ctx context.Context, r *responder, key, name, tmpl, arg string) {
 	if argShortcuts[name] && arg == "" {
 		_ = r.Send(ctx, "用法：/"+name+" <内容>")
@@ -581,7 +519,7 @@ func (g *Gateway) runShortcut(ctx context.Context, r *responder, key, name, tmpl
 // conversion to Beijing time.
 var displayZone = time.Local
 
-// runManaged runs a claude management subcommand and delivers its output. It
+// runManaged runs a Codex management subcommand and delivers its output. It
 // escalates like a turn reply (active push, then queue) so slow output is never
 // silently lost.
 func (g *Gateway) runManaged(r *responder, key, label string, args ...string) {
@@ -596,48 +534,57 @@ func (g *Gateway) runManaged(r *responder, key, label string, args ...string) {
 	g.deliverOrQueue(context.Background(), r, g.sessions.Get(key), key, "**"+label+"**\n"+out)
 }
 
-// cmdMemory shows the CLAUDE.md memory files Claude loads (global + project).
-func (g *Gateway) cmdMemory(r *responder, key string) {
-	home, _ := os.UserHomeDir()
-	candidates := []string{filepath.Join(home, ".claude", "CLAUDE.md")}
-	if wd := g.bridge.DefaultWorkDir(); wd != "" {
-		candidates = append(candidates, filepath.Join(wd, "CLAUDE.md"))
-	}
-	var b strings.Builder
-	b.WriteString("**🧠 记忆 (CLAUDE.md)**")
-	found := false
-	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		found = true
-		b.WriteString("\n\n**" + p + "**\n" + strings.TrimSpace(string(data)))
-	}
-	if !found {
-		b.WriteString("\n（暂无 CLAUDE.md 记忆文件；让我“记住…”即可创建）")
-	}
-	g.deliverOrQueue(context.Background(), r, g.sessions.Get(key), key, b.String())
-}
-
-// cmdDoctor reports a practical environment health summary (claude doctor itself
-// is interactive-only, so this gives the equivalent useful checks).
+// cmdDoctor reports Codex's own environment health summary.
 func (g *Gateway) cmdDoctor(r *responder, key string) {
-	ver, _ := g.bridge.RunCLI(context.Background(), "--version")
-	plan := "未知"
-	auth := "❌ 失败"
-	if u, err := claude.FetchUsage(context.Background()); err == nil {
-		auth = "✅ 正常"
-		if u.Plan != "" {
-			plan = prettyPlan(u.Plan)
+	out, err := g.bridge.RunCLI(context.Background(), "doctor")
+	if out == "" {
+		if err != nil {
+			out = "执行失败：" + short(err.Error())
+		} else {
+			out = "（无输出）"
 		}
 	}
-	_ = r.Send(context.Background(), "## 🩺 环境诊断\n\n"+kvLines([][2]string{
-		{"Claude CLI", strings.TrimSpace(ver)},
-		{"订阅认证", auth + " · " + plan},
+	head := "## 🩺 Codex 诊断\n\n" + kvLines([][2]string{
 		{"网关", "v" + Version + " · 运行 " + g.uptime()},
 		{"工具权限", authorityLabel(g.bridge.FullAuthority())},
-	}))
+	})
+	g.deliverOrQueue(context.Background(), r, g.sessions.Get(key), key, head+"\n\n"+out)
+}
+
+// cmdUsage reports local, verifiable Codex usage. The current npm Codex CLI has
+// app-server schemas for account/rateLimits/read, but no stable exposed command
+// or managed daemon on this install, so we do not fabricate subscription-window
+// numbers when the API is unavailable.
+func (g *Gateway) cmdUsage(r *responder, key string) {
+	ctx := context.Background()
+	sess := g.sessions.Get(key)
+	rows := [][2]string{
+		{"网关", "v" + Version + " · 运行 " + g.uptime()},
+		{"轮数", fmt.Sprintf("%d", sess.TurnCount())},
+	}
+	if out, err := g.bridge.RunCLI(ctx, "login", "status"); strings.TrimSpace(out) != "" {
+		rows = append(rows, [2]string{"登录", strings.Join(strings.Fields(out), " ")})
+	} else if err != nil {
+		rows = append(rows, [2]string{"登录", "检查失败：" + short(err.Error())})
+	}
+	if u := sess.LastUsage(); !u.At.IsZero() {
+		rows = append(rows,
+			[2]string{"最近一轮", humanDur(time.Since(u.At)) + "前 · " + u.Duration.Round(time.Millisecond).String()},
+			[2]string{"输入 tokens", fmt.Sprintf("%d（缓存 %d）", u.InputTokens, u.CachedInputTokens)},
+			[2]string{"输出 tokens", fmt.Sprintf("%d（推理 %d）", u.OutputTokens, u.ReasoningOutputTokens)},
+			[2]string{"合计 tokens", fmt.Sprintf("%d", u.TotalTokens)},
+		)
+	} else {
+		rows = append(rows, [2]string{"最近一轮", "暂无已完成 Codex turn"})
+	}
+	if e := sess.LastError(); !e.At.IsZero() {
+		rows = append(rows, [2]string{"最近错误", humanDur(time.Since(e.At)) + "前 · " + short(e.Message)})
+	}
+	rows = append(rows, [2]string{
+		"订阅窗口",
+		"当前 npm Codex CLI 未公开 5h/每周额度命令；待 standalone app-server 可用后接 account/rateLimits/read",
+	})
+	g.deliverOrQueue(ctx, r, sess, key, "## 📊 Codex 用量\n\n"+kvLines(rows))
 }
 
 // persist saves all session state to disk (best-effort; failures are logged).
@@ -651,15 +598,15 @@ func (g *Gateway) persist() {
 // SaveState exposes session persistence for the app's shutdown/periodic hooks.
 func (g *Gateway) SaveState() { g.persist() }
 
-// compactPrompt asks Claude to produce the handoff summary /compact seeds the
+// compactPrompt asks Codex to produce the handoff summary /compact seeds the
 // fresh context with. The summary must be self-contained: the next turn starts
 // a brand-new session whose only link to the past is this text.
 const compactPrompt = `请把我们本次对话到目前为止的全部内容，压缩成一份详尽的中文交接摘要，供“新的你”无缝接手。必须包含：正在进行的任务及其当前进度、已经做过的关键操作和结论、重要的文件路径/命令/数据、我的偏好和约定、尚未完成的下一步。直接输出摘要正文，不要开场白和客套。`
 
-// cmdCompact compacts the conversation: it asks Claude (inside the current
-// session) for a handoff summary, then resets the Claude session and stores the
+// cmdCompact compacts the conversation: it asks Codex (inside the current
+// session) for a handoff summary, then resets the Codex thread and stores the
 // summary as a seed that is prepended to the next turn — the same effect as
-// Claude Code's /compact, reimplemented for print-mode turns.
+// /compact, reimplemented for non-interactive turns.
 func (g *Gateway) cmdCompact(r *responder, key, focus string) {
 	ctx := context.Background()
 	sess := g.sessions.Get(key)
@@ -686,7 +633,7 @@ func (g *Gateway) cmdCompact(r *responder, key, focus string) {
 	if strings.TrimSpace(focus) != "" {
 		prompt += "\n\n压缩时请特别保留与此相关的细节：" + focus
 	}
-	res, err := g.bridge.Run(turnCtx, claude.Request{
+	res, err := g.bridge.Run(turnCtx, codex.Request{
 		SessionID:      sess.GetSessionID(),
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
@@ -706,50 +653,15 @@ func (g *Gateway) cmdCompact(r *responder, key, focus string) {
 		return
 	}
 	summary := strings.TrimSpace(res.Text)
-	sess.ClearClaude()
+	sess.ClearThread()
 	sess.SetSeed(summary)
 	g.persist()
 	g.deliverOrQueue(ctx, r, sess, key,
 		fmt.Sprintf("✅ **上下文已压缩**（摘要 %d 字）。继续对话即可，我会带着摘要接着干；想丢弃摘要重新开始发 /new。", runeLen(summary)))
 }
 
-// cmdExport renders the current conversation's CLI transcript as Markdown and
-// delivers it as a file.
-func (g *Gateway) cmdExport(r *responder, key string) {
-	ctx := context.Background()
-	sess := g.sessions.Get(key)
-	sid := sess.GetSessionID()
-	if sid == "" {
-		_ = r.Send(ctx, "ℹ️ 当前是新会话，还没有可导出的内容。也可以先 /resume 连上历史会话再导出。")
-		return
-	}
-	workDir := sess.GetWorkDir()
-	if workDir == "" {
-		workDir = g.bridge.DefaultWorkDir()
-	}
-	path := filepath.Join(projectDir(workDir), sid+".jsonl")
-	md, count, err := renderTranscript(path, sid)
-	if err != nil {
-		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
-		return
-	}
-	dir := filepath.Join(g.cfg.MediaDir, sanitize(key))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
-		return
-	}
-	out := filepath.Join(dir, time.Now().Format("export-0102-150405.md"))
-	if err := os.WriteFile(out, []byte(md), 0o600); err != nil {
-		_ = r.Send(ctx, "⚠️ 导出失败："+short(err.Error()))
-		return
-	}
-	g.deliverOrQueue(ctx, r, sess, key,
-		fmt.Sprintf("📤 **对话已导出**（%d 条消息）\n\n@@QQ_FILE: %s", count, out))
-}
-
-// cmdResume lists recent Claude sessions (no argument) or re-attaches the
-// conversation to one picked by list number or id prefix — the same recovery
-// Claude Code's --resume gives in the terminal.
+// cmdResume lists recent Codex threads (no argument) or re-attaches the
+// conversation to one picked by list number or id prefix.
 func (g *Gateway) cmdResume(r *responder, key, arg string) {
 	ctx := context.Background()
 	sess := g.sessions.Get(key)
@@ -802,7 +714,7 @@ func (g *Gateway) cmdResume(r *responder, key, arg string) {
 	sess.CancelTurn()
 	sess.AttachSession(target)
 	g.persist()
-	title := sessionTitle(filepath.Join(projectDir(workDir), target+".jsonl"))
+	title := sessionTitleByID(workDir, target)
 	if title == "" {
 		title = target[:8]
 	}
@@ -814,64 +726,6 @@ func authorityLabel(full bool) string {
 		return "完全（无需确认）"
 	}
 	return "受限"
-}
-
-func (g *Gateway) usageText() string {
-	u, err := claude.FetchUsage(context.Background())
-	if err != nil {
-		turns, cost := g.usageSnapshot()
-		return fmt.Sprintf("**📊 用量**\n订阅用量获取失败：%s\n本网关累计 %d 轮 · $%.4f", short(err.Error()), turns, cost)
-	}
-	rows := make([][2]string, 0, len(u.Limits)+2)
-	for _, w := range u.Limits {
-		val := fmt.Sprintf("%.0f%%", w.Percent)
-		if w.Severity != "" && w.Severity != "normal" {
-			val += " ⚠️"
-		}
-		if !w.ResetsAt.IsZero() {
-			val += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(displayZone).Format("01-02 15:04"))
-		}
-		rows = append(rows, [2]string{limitLabel(w), val})
-	}
-	if u.ExtraEnabled {
-		rows = append(rows, [2]string{"额外credits", fmt.Sprintf("%.0f%%", u.ExtraPercent)})
-	}
-	if len(rows) == 0 {
-		rows = append(rows, [2]string{"额度", "暂无数据"})
-	}
-	turns, cost := g.usageSnapshot()
-	rows = append(rows, [2]string{"本网关累计", fmt.Sprintf("%d 轮 · $%.4f", turns, cost)})
-
-	head := "## 📊 订阅用量"
-	if u.Plan != "" {
-		head += " · " + prettyPlan(u.Plan)
-	}
-	return head + "\n\n" + kvLines(rows)
-}
-
-// limitLabel gives a short Chinese label for one usage limit window.
-func limitLabel(w claude.Limit) string {
-	if w.Scope != "" {
-		return "本周·" + w.Scope
-	}
-	switch w.Kind {
-	case "session":
-		return "会话(5h)"
-	case "weekly_all":
-		return "本周(全部)"
-	case "weekly_scoped":
-		return "本周(限定)"
-	}
-	switch w.Group {
-	case "session":
-		return "会话(5h)"
-	case "weekly":
-		return "本周"
-	}
-	if w.Kind != "" {
-		return w.Kind
-	}
-	return "额度"
 }
 
 func humanDur(d time.Duration) string {
@@ -889,18 +743,6 @@ func humanDur(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dm", m)
 	}
-}
-
-func prettyPlan(tier string) string {
-	switch tier {
-	case "default_claude_max_20x":
-		return "Claude Max 20x"
-	case "default_claude_max_5x":
-		return "Claude Max 5x"
-	case "default_claude_pro":
-		return "Claude Pro"
-	}
-	return tier
 }
 
 func (g *Gateway) statusText(key string) string {
@@ -974,9 +816,10 @@ func (g *Gateway) sessionsText() string {
 	if len(snaps) == 0 {
 		return "**💬 会话** 暂无活跃会话。"
 	}
-	turns, cost := g.usageSnapshot()
 	rows := make([][2]string, 0, len(snaps))
+	totalTurns := 0
 	for _, s := range snaps {
+		totalTurns += s.Turns
 		state := "空闲"
 		if s.Running {
 			state = "运行中"
@@ -990,23 +833,22 @@ func (g *Gateway) sessionsText() string {
 			fmt.Sprintf("%s · %s · %d 轮 · 闲置 %s", conn, state, s.Turns, time.Since(s.LastActive).Round(time.Second)),
 		})
 	}
-	head := fmt.Sprintf("## 💬 活跃会话 %d 个 · 累计 %d 轮 · $%.4f", len(snaps), turns, cost)
+	head := fmt.Sprintf("## 💬 活跃会话 %d 个 · 累计 %d 轮", len(snaps), totalTurns)
 	return head + "\n\n" + kvLines(rows)
 }
 
 // commandAliases maps every accepted command token (English + Chinese) to its
 // canonical handler. The set is deliberately small — just the controls that
-// matter for an agentic Claude Code session; everything else is done by simply
-// telling Claude what you want.
+// matter for an agentic Codex session; everything else is done by simply telling
+// Codex what you want.
 var commandAliases = map[string]string{
 	// conversation & control
 	"/new": "new", "/reset": "new", "/clear": "new", "新对话": "new", "重置": "new", "清空": "new",
 	"/retry": "retry", "/redo": "retry", "重试": "retry", "重发": "retry",
 	"/stop": "stop", "/cancel": "stop", "/abort": "stop", "停止": "stop", "中断": "stop",
 	"/compact": "compact", "压缩": "compact", "压缩上下文": "compact",
-	// session recovery & export
+	// session recovery
 	"/resume": "resume", "/continue": "resume", "恢复": "resume", "恢复会话": "resume",
-	"/export": "export", "导出": "export", "导出对话": "export",
 	// configuration
 	"/model": "model", "模型": "model",
 	"/effort": "effort", "强度": "effort", "思考强度": "effort", "等级": "effort",
@@ -1014,21 +856,18 @@ var commandAliases = map[string]string{
 	"/dir": "dir", "/cd": "dir", "/cwd": "dir", "/pwd": "dir", "目录": "dir",
 	"/mode": "mode", "权限": "mode", "模式": "mode",
 	"/timeout": "timeout", "时限": "timeout", "超时": "timeout",
-	// Claude Code management commands
-	"/agents": "agents", "/agent": "agents", "子代理": "agents", "代理": "agents",
+	// Codex management commands
 	"/mcp":    "mcp",
-	"/memory": "memory", "/mem": "memory", "记忆": "memory",
 	"/doctor": "doctor", "/health": "doctor", "诊断": "doctor", "健康": "doctor",
-	// Claude Code feature shortcuts
+	// Codex feature shortcuts
 	"/review": "review", "评审": "review", "审查": "review",
 	"/diff": "diff", "改动": "diff",
 	"/explain": "explain", "解释": "explain",
 	"/web": "web", "搜索": "web", "联网": "web",
 	"/init": "init",
-	// info & usage
-	"/usage": "usage", "额度": "usage", "用量": "usage",
-	"/cost": "cost", "花费": "cost",
+	// info
 	"/status": "status", "/stat": "status", "状态": "status",
+	"/usage": "usage", "用量": "usage", "额度": "usage",
 	"/whoami": "whoami", "/me": "whoami", "我是谁": "whoami",
 	"/sessions": "sessions", "/conv": "sessions", "会话": "sessions",
 	"/version": "version", "/ver": "version", "版本": "version",
@@ -1058,35 +897,31 @@ var helpGroups = []helpGroup{
 		{"/compact", "压缩续聊", "把长对话压成交接摘要后继续；/compact <侧重点> 可指定保留重点"},
 	}},
 	{"⏪ 会话", []helpCommand{
-		{"/resume", "恢复历史", "列出历史会话；/resume <序号或 id 前缀> 接回"},
-		{"/export", "导出记录", "把本会话导出为 Markdown 文件发给你"},
+		{"/resume", "恢复历史", "列出 Codex 历史 thread；/resume <序号或 id 前缀> 接回"},
 		{"/sessions", "会话列表", "所有活跃会话一览"},
 		{"/status", "运行状态", "会话 / 模型 / 当前任务实时状态"},
 	}},
 	{"⚙️ 配置", []helpCommand{
-		{"/model", "切换模型", "看当前与可选模型；/model <全名> 切换，default 恢复"},
-		{"/effort", "思考强度", "low/medium/high/xhigh/max；/effort <等级> 设置，default 恢复"},
-		{"/think", "深度思考", "下一条回复用深度思考"},
+		{"/model", "切换模型", "看当前模型；/model <模型 id> 切换，default 恢复"},
+		{"/effort", "思考强度", "minimal/low/medium/high/xhigh；/effort <等级> 设置，default 恢复"},
+		{"/think", "深度思考", "下一条回复使用 xhigh"},
 		{"/dir", "工作目录", "/dir <路径> 切换，default 恢复"},
 		{"/mode", "权限模式", "default / plan / acceptEdits / bypass"},
 		{"/timeout", "单轮时限", "/timeout <分钟> 设置本会话时限，default 恢复"},
 	}},
 	{"🧩 管理", []helpCommand{
-		{"/agents", "子代理", "列出可用的后台子代理"},
-		{"/mcp", "MCP", "列出配置的 MCP 服务器"},
-		{"/memory", "记忆", "查看加载的 CLAUDE.md 记忆"},
-		{"/doctor", "诊断", "环境健康检查（CLI / 认证 / 网关）"},
+		{"/mcp", "MCP", "列出 Codex MCP 服务器"},
+		{"/doctor", "诊断", "运行 codex doctor 并返回诊断"},
 	}},
 	{"⚡ 快捷", []helpCommand{
 		{"/review", "代码评审", "评审当前代码改动"},
 		{"/diff", "git 改动", "总结 git status 与 diff"},
 		{"/explain", "解释内容", "/explain <代码或问题>"},
 		{"/web", "联网搜索", "/web <问题>，给出带来源的答案"},
-		{"/init", "项目文档", "生成 / 更新项目 CLAUDE.md"},
+		{"/init", "项目文档", "生成 / 更新项目 AGENTS.md"},
 	}},
 	{"📊 信息", []helpCommand{
-		{"/usage", "额度", "订阅用量与重置时间"},
-		{"/cost", "花费", "上一条回复的耗时与成本"},
+		{"/usage", "用量", "登录状态、最近 token 用量；订阅窗口可用时显示额度"},
 		{"/whoami", "身份", "我的 open_id"},
 		{"/version", "版本", "网关版本与运行时长"},
 		{"/ping", "连通", "连通性测试"},
@@ -1118,7 +953,7 @@ func (g *Gateway) sendHelp(ctx context.Context, r *responder, arg string) {
 
 func buildHelpText() string {
 	var b strings.Builder
-	b.WriteString("## 🤖 Claude Code · QQ\n\n直接发需求即可，命令只是辅助：\n")
+	b.WriteString("## 🤖 Codex · QQ\n\n直接发需求即可，命令只是辅助：\n")
 	for _, g := range helpGroups {
 		b.WriteString("\n- **" + g.title + "**　")
 		for i, c := range g.cmds {
@@ -1134,7 +969,7 @@ func buildHelpText() string {
 
 func buildHelpFullText() string {
 	var b strings.Builder
-	b.WriteString("## 🤖 Claude Code · QQ · 全部命令\n\n可带参数的命令，不带参数发送就是查看当前状态：")
+	b.WriteString("## 🤖 Codex · QQ · 全部命令\n\n可带参数的命令，不带参数发送就是查看当前状态：")
 	for _, g := range helpGroups {
 		b.WriteString("\n\n**" + g.title + "**")
 		for _, c := range g.cmds {
@@ -1164,8 +999,8 @@ const (
 )
 
 // progressNotice describes what a long-running turn is doing right now, using
-// the session's live tool telemetry — so the wait feels like watching Claude
-// Code work, not like a dead line.
+// the session's live tool telemetry so the wait feels like watching Codex work,
+// not like a dead line.
 func progressNotice(sess *session.Session, elapsed time.Duration, more bool) string {
 	tool, calls, _ := sess.ToolActivity()
 	msg := fmt.Sprintf("🟡 还在干活（已 %s", elapsed.Round(time.Second))
@@ -1179,9 +1014,9 @@ func progressNotice(sess *session.Session, elapsed time.Duration, more bool) str
 	return msg
 }
 
-// runTurn executes one Claude Code turn for a conversation and sends the reply,
-// including any inbound attachments (downloaded for Claude to read) and any
-// outbound media Claude asks to send.
+// runTurn executes one Codex turn for a conversation and sends the reply,
+// including any inbound attachments (downloaded for Codex to read) and any
+// outbound media Codex asks to send.
 func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, atts []qq.MessageAttachment) {
 	sess := g.sessions.Get(key)
 	// Contain any panic in this turn: log it and tell the user, rather than letting it
@@ -1226,7 +1061,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	})
 	defer ping2.Stop()
 
-	// Apply a pending /think request, then download any attachments so Claude
+	// Apply a pending /think request, then download any attachments so Codex
 	// can read them as local files. The attachment note is kept separate so
 	// /retry can replay the message WITH its attachments (the files persist on
 	// disk) instead of silently dropping them.
@@ -1235,8 +1070,9 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		retryText = strings.TrimSpace(text + "\n\n" + note)
 	}
 	prompt := retryText
+	effort := sess.GetEffort()
 	if sess.TakeThinkNext() {
-		prompt = "ultrathink\n\n" + prompt
+		effort = "xhigh"
 	}
 
 	resuming := sess.GetSessionID()
@@ -1260,17 +1096,17 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	// Capture the session generation now; if /new (or an idle reset) clears the
 	// session while this turn runs, the generation changes and we won't write our
 	// session id back at the end (see SetSessionIDIfGen).
-	gen := sess.ClaudeGen()
+	gen := sess.ThreadGen()
 	var timeout time.Duration
 	if min := sess.GetTimeoutMin(); min > 0 {
 		timeout = time.Duration(min) * time.Minute
 	}
-	g.logger.Printf("[gateway] [%s] running claude turn (resume=%t seed=%t)", key, resuming != "", seed != "")
-	res, err := g.bridge.Run(turnCtx, claude.Request{
+	g.logger.Printf("[gateway] [%s] running codex turn (resume=%t seed=%t)", key, resuming != "", seed != "")
+	res, err := g.bridge.Run(turnCtx, codex.Request{
 		SessionID:      resuming,
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
-		Effort:         sess.GetEffort(),
+		Effort:         effort,
 		WorkDir:        sess.GetWorkDir(),
 		PermissionMode: sess.GetMode(),
 		Timeout:        timeout,
@@ -1291,7 +1127,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 			sess.SetSessionID(res.SessionID)
 			g.logger.Printf("[gateway] [%s] kept session id after error for resume", key)
 		} else if resuming != "" {
-			sess.ClearClaude()
+			sess.ClearThread()
 			g.logger.Printf("[gateway] [%s] cleared possibly-stale session id after error", key)
 		} else if seed != "" && (res == nil || res.SessionID == "") {
 			// The seeded turn never took hold — re-arm the compact summary so the
@@ -1299,11 +1135,12 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 			sess.SetSeed(seed)
 		}
 		g.persist()
-		g.logger.Printf("[gateway] [%s] claude error: %v", key, err)
-		if errors.Is(err, claude.ErrTurnTimeout) {
+		g.logger.Printf("[gateway] [%s] codex error: %v", key, err)
+		sess.RecordError(err.Error())
+		if errors.Is(err, codex.ErrTurnTimeout) {
 			g.deliverOrQueue(ctx, r, sess, key, "⏳ 这条任务跑满了时限被中止。进度已保存，直接回我一句「继续」就能接着干。")
 		} else {
-			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Claude error): "+short(err.Error()))
+			g.deliverOrQueue(ctx, r, sess, key, "⚠️ 出错了 (Codex error): "+short(err.Error()))
 		}
 		return
 	}
@@ -1311,8 +1148,9 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 	// auth problem): is_error marks that. Surface it as an error and do NOT advance the
 	// session — persisting the id/turn here is what previously wedged the conversation.
 	if res.IsError {
-		g.logger.Printf("[gateway] [%s] claude returned is_error: %s", key, short(res.Text))
-		msg := "⚠️ Claude 返回错误：" + strings.TrimSpace(res.Text)
+		g.logger.Printf("[gateway] [%s] codex returned is_error: %s", key, short(res.Text))
+		sess.RecordError(strings.TrimSpace(res.Text))
+		msg := "⚠️ Codex 返回错误：" + strings.TrimSpace(res.Text)
 		if strings.Contains(strings.ToLower(res.Text), "model") {
 			msg += "\n\n可能是模型设置问题，试试 /model default 恢复默认模型。"
 		}
@@ -1325,8 +1163,15 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		}
 	}
 	sess.IncTurn()
-	sess.RecordTurn(retryText, res.CostUSD, res.DurationMS)
-	g.addUsage(res.CostUSD)
+	sess.RecordTurn(retryText)
+	sess.RecordUsage(
+		res.InputTokens,
+		res.CachedInputTokens,
+		res.OutputTokens,
+		res.ReasoningOutputTokens,
+		res.TotalTokens,
+		time.Duration(res.DurationMS)*time.Millisecond,
+	)
 	g.persist()
 
 	reply := strings.TrimSpace(res.Text)
@@ -1375,7 +1220,7 @@ func (g *Gateway) PushToOperator(ctx context.Context, text string) error {
 // escalates exactly as for a failed send (active push, then queue).
 var errPassiveBudget = errors.New("passive-reply budget exhausted for this message")
 
-// deliver sends Claude's reply: extracts outbound media directives, sends the
+// deliver sends Codex's reply: extracts outbound media directives, sends the
 // text (as a file when it is too long to fit the passive-reply budget), then
 // delivers each media item — all within QQ's 5-passive-reply cap. It returns a
 // non-nil error if the text itself could not be sent (so the caller can fall back

@@ -1,18 +1,11 @@
-package claude
+package codex
 
 import "strings"
 
-// NormalizeModel maps a human-typed model name to a value the Claude Code CLI's
+// NormalizeModel maps a human-typed model name to a value the Codex CLI's
 // --model flag accepts, returning ok=false for input that clearly isn't a model.
-//
-// The CLI wants a short alias (opus / sonnet / haiku / fable / opusplan) or a
-// concrete id (e.g. claude-opus-4-8, claude-opus-4-8[1m]). It does NOT accept the
-// display names the Claude apps show ("Opus 4.8 (1M context)"): such a value comes
-// back as an is_error 404 at exit code 0, which previously got stored on the
-// session and wedged every following turn. So we translate the common display
-// forms here and reject obviously-invalid free text instead of passing it through.
-//
-// An empty string (or default/reset) maps to "" = the CLI default.
+// The accepted model set changes over time, so this only normalizes common
+// shorthand and rejects multi-word prose that would wedge later turns.
 func NormalizeModel(s string) (string, bool) {
 	raw := strings.TrimSpace(s)
 	if raw == "" {
@@ -23,27 +16,15 @@ func NormalizeModel(s string) (string, bool) {
 	switch low {
 	case "default", "reset", "默认", "重置":
 		return "", true
-	case "opus", "sonnet", "haiku", "fable", "opusplan":
-		return low, true
 	}
-	// An explicit concrete id — trust it verbatim (preserve case + any [1m] suffix).
-	if strings.HasPrefix(low, "claude-") {
-		return raw, true
+	if isRetiredClaudeModel(low) {
+		return "", false
 	}
-
-	is1m := strings.Contains(low, "1m") || strings.Contains(low, "百万") || strings.Contains(low, "1000k")
-	switch {
-	case strings.Contains(low, "opus"):
-		if is1m {
-			return "claude-opus-4-8[1m]", true
-		}
-		return "opus", true
-	case strings.Contains(low, "sonnet"):
-		return "sonnet", true
-	case strings.Contains(low, "haiku"):
-		return "haiku", true
-	case strings.Contains(low, "fable"):
-		return "fable", true
+	if strings.HasPrefix(low, "gpt ") {
+		return "gpt-" + strings.TrimSpace(strings.TrimPrefix(low, "gpt ")), true
+	}
+	if strings.HasPrefix(low, "gpt") && len(low) > 3 && low[3] >= '0' && low[3] <= '9' {
+		return "gpt-" + low[3:], true
 	}
 	// A single bare token we don't recognize might be a new alias/id the CLI knows —
 	// let it try, but only if it LOOKS like a model id (ASCII letters/digits/.-_). A
@@ -83,4 +64,13 @@ func fullwidthToASCII(s string) string {
 
 func collapseSpaces(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func isRetiredClaudeModel(s string) bool {
+	for _, marker := range []string{"opus", "sonnet", "haiku", "fable"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }

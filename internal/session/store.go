@@ -1,6 +1,6 @@
 // Session persistence: the manager can snapshot every conversation's durable
 // state to a JSON file and restore it at startup, so a gateway restart (upgrade,
-// crash, reboot) no longer loses the resumable Claude session, per-conversation
+// crash, reboot) no longer loses the resumable Codex thread, per-conversation
 // settings, or queued replies — the conversation continues as if nothing happened.
 package session
 
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -43,7 +44,7 @@ func (s *Session) exportState() persistedSession {
 	defer s.ctrl.Unlock()
 	return persistedSession{
 		Key:        s.Key,
-		SessionID:  s.ClaudeSessionID,
+		SessionID:  s.ThreadID,
 		Model:      s.Model,
 		Effort:     s.Effort,
 		WorkDir:    s.WorkDir,
@@ -61,8 +62,8 @@ func (s *Session) exportState() persistedSession {
 // importState restores a session's durable fields from a snapshot.
 func (s *Session) importState(p persistedSession) {
 	s.ctrl.Lock()
-	s.ClaudeSessionID = p.SessionID
-	s.Model = p.Model
+	s.ThreadID = p.SessionID
+	s.Model = sanitizeModel(p.Model)
 	s.Effort = p.Effort
 	s.WorkDir = p.WorkDir
 	s.Mode = p.Mode
@@ -74,6 +75,16 @@ func (s *Session) importState(p persistedSession) {
 	s.ctrl.Unlock()
 	s.seqCounter.Store(p.Seq)
 	s.LastActive = p.LastActive
+}
+
+func sanitizeModel(v string) string {
+	low := strings.ToLower(strings.TrimSpace(v))
+	for _, marker := range []string{"opus", "sonnet", "haiku", "fable"} {
+		if strings.Contains(low, marker) {
+			return ""
+		}
+	}
+	return v
 }
 
 // SetStatePath configures where SaveState/LoadState persist the sessions.

@@ -12,7 +12,7 @@ import (
 // Config is the full gateway configuration.
 type Config struct {
 	QQ      QQConfig      `toml:"qq"`
-	Claude  ClaudeConfig  `toml:"claude"`
+	Codex   CodexConfig   `toml:"codex"`
 	Gateway GatewayConfig `toml:"gateway"`
 }
 
@@ -35,15 +35,17 @@ type QQConfig struct {
 	WebhookTLSKey  string `toml:"webhook_tls_key"`
 }
 
-// ClaudeConfig configures the local Claude Code CLI invocation.
-type ClaudeConfig struct {
+// CodexConfig configures the local Codex CLI invocation.
+type CodexConfig struct {
 	Binary                     string   `toml:"binary"`
 	WorkDir                    string   `toml:"work_dir"`
 	Model                      string   `toml:"model"`
+	Effort                     string   `toml:"effort"`
 	PermissionMode             string   `toml:"permission_mode"`
+	Sandbox                    string   `toml:"sandbox"`
+	ApprovalPolicy             string   `toml:"approval_policy"`
 	DangerouslySkipPermissions bool     `toml:"dangerously_skip_permissions"`
-	AllowedTools               []string `toml:"allowed_tools"`
-	DisallowedTools            []string `toml:"disallowed_tools"`
+	WebSearch                  bool     `toml:"web_search"`
 	AppendSystemPrompt         string   `toml:"append_system_prompt"`
 	AddDirs                    []string `toml:"add_dirs"`
 	ExtraArgs                  []string `toml:"extra_args"`
@@ -66,7 +68,7 @@ type GatewayConfig struct {
 	// MediaDir is where inbound attachments are downloaded and outbound files are
 	// staged. Default: <home>/.cc-qq/media.
 	MediaDir string `toml:"media_dir"`
-	// StatePath is where session state (resumable Claude session ids, per-chat
+	// StatePath is where session state (resumable Codex thread ids, per-chat
 	// settings, queued replies) is persisted across restarts. Default:
 	// <home>/.cc-qq/state.json. Set to "none" to disable persistence.
 	StatePath string `toml:"state_path"`
@@ -111,11 +113,17 @@ func (c *Config) applyDefaults() {
 	if c.QQ.WebhookAddr == "" {
 		c.QQ.WebhookAddr = ":8443"
 	}
-	if c.Claude.Binary == "" {
-		c.Claude.Binary = "claude"
+	if c.Codex.Binary == "" {
+		c.Codex.Binary = "codex"
 	}
-	if c.Claude.TimeoutSeconds == 0 {
-		c.Claude.TimeoutSeconds = 300
+	if c.Codex.TimeoutSeconds == 0 {
+		c.Codex.TimeoutSeconds = 300
+	}
+	if c.Codex.Sandbox == "" {
+		c.Codex.Sandbox = "read-only"
+	}
+	if c.Codex.ApprovalPolicy == "" {
+		c.Codex.ApprovalPolicy = "never"
 	}
 	if c.Gateway.SessionIdleMinutes == 0 {
 		c.Gateway.SessionIdleMinutes = 30
@@ -167,24 +175,34 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("qq.transport must be \"websocket\" or \"webhook\", got %q", c.QQ.Transport)
 	}
-	if c.Claude.WorkDir != "" {
-		if _, err := os.Stat(c.Claude.WorkDir); err != nil {
-			return fmt.Errorf("claude.work_dir %q: %w", c.Claude.WorkDir, err)
+	if c.Codex.WorkDir != "" {
+		if _, err := os.Stat(c.Codex.WorkDir); err != nil {
+			return fmt.Errorf("codex work_dir %q: %w", c.Codex.WorkDir, err)
 		}
 	}
-	switch c.Claude.PermissionMode {
-	case "", "default", "plan", "acceptEdits", "bypassPermissions", "auto", "dontAsk":
-		// valid CLI --permission-mode values (empty = leave the CLI default)
+	switch c.Codex.PermissionMode {
+	case "", "default", "plan", "acceptEdits", "bypassPermissions", "bypass", "auto", "dontAsk":
+		// legacy gateway modes, mapped to Codex sandbox/approval flags.
 	default:
-		return fmt.Errorf("claude.permission_mode %q is invalid (use one of: default, plan, "+
-			"acceptEdits, bypassPermissions, auto, dontAsk)", c.Claude.PermissionMode)
+		return fmt.Errorf("permission_mode %q is invalid (use one of: default, plan, "+
+			"acceptEdits, bypassPermissions)", c.Codex.PermissionMode)
+	}
+	switch c.Codex.Sandbox {
+	case "", "read-only", "workspace-write", "danger-full-access":
+	default:
+		return fmt.Errorf("sandbox %q is invalid (use one of: read-only, workspace-write, danger-full-access)", c.Codex.Sandbox)
+	}
+	switch c.Codex.ApprovalPolicy {
+	case "", "never", "on-request", "on-failure", "untrusted":
+	default:
+		return fmt.Errorf("approval_policy %q is invalid (use one of: never, on-request, on-failure, untrusted)", c.Codex.ApprovalPolicy)
 	}
 	return nil
 }
 
-// ClaudeTimeout returns the configured per-turn timeout.
-func (c *Config) ClaudeTimeout() time.Duration {
-	return time.Duration(c.Claude.TimeoutSeconds) * time.Second
+// CodexTimeout returns the configured per-turn timeout.
+func (c *Config) CodexTimeout() time.Duration {
+	return time.Duration(c.Codex.TimeoutSeconds) * time.Second
 }
 
 // SessionIdleTTL returns the configured idle TTL.

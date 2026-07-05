@@ -13,7 +13,7 @@ func cleanContent(s string) string {
 	s = mentionRe.ReplaceAllString(s, "")
 	s = strings.TrimSpace(s)
 	// Chinese IMEs often emit a full-width slash; fold a leading one so "／help" is
-	// still recognized as the "/help" command rather than silently sent to Claude.
+	// still recognized as the "/help" command rather than silently sent to Codex.
 	if strings.HasPrefix(s, "／") {
 		s = "/" + strings.TrimPrefix(s, "／")
 	}

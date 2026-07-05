@@ -24,13 +24,13 @@ func TestPendingQueueOrderAndClear(t *testing.T) {
 	}
 }
 
-func TestPendingSurvivesClearClaude(t *testing.T) {
-	// A queued result must not be dropped just because the Claude session id is
+func TestPendingSurvivesClearThread(t *testing.T) {
+	// A queued result must not be dropped just because the Codex thread id is
 	// cleared (e.g. an idle reset or /new) — the user still wants that output.
-	s := &Session{Key: "c2c:x", ClaudeSessionID: "abc"}
+	s := &Session{Key: "c2c:x", ThreadID: "abc"}
 	s.QueuePending("result")
-	s.ClearClaude()
+	s.ClearThread()
 	if got := s.TakePending(); len(got) != 1 || got[0] != "result" {
-		t.Fatalf("pending after ClearClaude = %v, want [result]", got)
+		t.Fatalf("pending after ClearThread = %v, want [result]", got)
 	}
 }

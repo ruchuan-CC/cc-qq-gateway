@@ -17,10 +17,10 @@ func TestNextSeqMonotonicAndSurvivesReset(t *testing.T) {
 	if second := s.NextSeq(); second != 2 {
 		t.Fatalf("second NextSeq = %d, want 2", second)
 	}
-	// A reset (/new or idle) clears the Claude session but must NOT rewind seq.
-	s.ClearClaude()
+	// A reset (/new or idle) clears the Codex thread but must NOT rewind seq.
+	s.ClearThread()
 	if next := s.NextSeq(); next != 3 {
-		t.Fatalf("NextSeq after ClearClaude = %d, want 3 (must not rewind)", next)
+		t.Fatalf("NextSeq after ClearThread = %d, want 3 (must not rewind)", next)
 	}
 }
 

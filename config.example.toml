@@ -27,36 +27,38 @@ webhook_path = "/qqbot"
 webhook_tls_cert = ""
 webhook_tls_key  = ""
 
-[claude]
-# Path to the Claude Code CLI.
-binary = "claude"
-# The project directory Claude Code operates in. Leave empty for the gateway's
+[codex]
+# Codex CLI invocation.
+# Path to the Codex CLI.
+binary = "codex"
+# The project directory Codex operates in. Leave empty for the gateway's
 # own working directory.
 work_dir = ""
-# Optional model override, e.g. "claude-opus-4-8". Empty uses the CLI default.
+# Optional model override, e.g. "gpt-5.5". Empty uses the Codex config/default.
 model = ""
+# Optional reasoning effort: minimal | low | medium | high | xhigh.
+effort = ""
 
 # Permission handling for non-interactive turns. One of:
 #   default | acceptEdits | plan | bypassPermissions
-# For a "the whole server is Claude's home" setup, use bypassPermissions.
+# For a "the whole server is Codex's home" setup, use bypassPermissions.
 permission_mode = "bypassPermissions"
-# Or skip all permission prompts (fully autonomous; use with care). When true,
-# this takes precedence over permission_mode. Enable for full server authority.
+# Codex sandbox/approval defaults used by permission_mode = "default".
+sandbox = "read-only"
+approval_policy = "never"
+# Or skip all approvals and sandboxing (fully autonomous; use with care). When
+# true, this takes precedence over permission_mode. Enable for full server authority.
 dangerously_skip_permissions = true
+# Enable Codex native web search for turns.
+web_search = true
 
-# Restrict tools if desired, e.g. ["Read", "Grep", "WebSearch"]. Leave empty for
-# unrestricted access.
-allowed_tools    = []
-disallowed_tools = []
-
-# Extra directories Claude may access (--add-dir), and any extra CLI flags. Use
+# Extra directories Codex may access (--add-dir), and any extra CLI flags. Use
 # ["/"] to grant the entire filesystem.
 add_dirs   = ["/"]
 extra_args = []
 
-# Appended to Claude's system prompt — useful to tune the chat persona and the
-# authority you want Claude to assume.
-append_system_prompt = "You are Claude, reachable directly over QQ by your operator. You have full administrative authority over this server. Be concise and chat-friendly; use plain text unless code is needed."
+# Prepended to each Codex prompt — useful to tune the chat persona and authority.
+append_system_prompt = "You are Codex, reachable directly over QQ by your operator. You have full administrative authority over this server. Be concise and chat-friendly; use plain text unless code is needed."
 
 # Per-turn timeout in seconds. Long tasks are supported (e.g. 7200 = 2h), but note
 # QQ passive replies expire after ~5 minutes, so a turn that runs much longer than
@@ -65,7 +67,7 @@ append_system_prompt = "You are Claude, reachable directly over QQ by your opera
 timeout_seconds = 7200
 
 [gateway]
-# Reset a conversation after this many idle minutes (starts a fresh Claude
+# Reset a conversation after this many idle minutes (starts a fresh Codex
 # session on the next message; the reset is announced to the user). 240 = a
 # thread survives lunch or a meeting without silently losing context.
 session_idle_minutes = 240
@@ -74,7 +76,7 @@ max_reply_chars = 1800
 # Where inbound attachments are downloaded and outbound files are staged.
 # Default: <home>/.cc-qq/media
 media_dir = ""
-# Where session state (resumable Claude session ids, per-chat model/dir/mode/
+# Where session state (resumable Codex thread ids, per-chat model/dir/mode/
 # timeout overrides, queued replies, the /compact seed) is persisted so a gateway
 # restart or upgrade is invisible to the conversation. Default:
 # <home>/.cc-qq/state.json. Set to "none" to disable persistence.
@@ -85,7 +87,7 @@ send_long_replies_as_file = true
 # Send replies as markdown (msg_type=2) instead of plain text. Requires the
 # markdown capability to be enabled for your bot.
 reply_as_markdown = false
-# Optional acknowledgement sent immediately while Claude thinks. Empty disables.
+# Optional acknowledgement sent immediately while Codex thinks. Empty disables.
 thinking_message = ""
 # Optional allowlist. If non-empty, only these C2C (single-chat) user open_ids may
 # talk to the bot. Empty serves any user. Send /whoami to learn your open_id.

@@ -2,14 +2,14 @@ package session
 
 import "testing"
 
-// A turn that finishes right as /new (ClearClaude) resets the conversation must not
+// A turn that finishes right as /new (ClearThread) resets the conversation must not
 // resurrect the cleared context: SetSessionIDIfGen with the pre-turn generation is
 // rejected once the generation has moved on.
 func TestSetSessionIDIfGenGuardsAgainstReset(t *testing.T) {
 	s := &Session{Key: "c2c:x"}
 
 	// Normal case: generation unchanged, the write lands.
-	gen := s.ClaudeGen()
+	gen := s.ThreadGen()
 	if !s.SetSessionIDIfGen("sess-1", gen) {
 		t.Fatal("expected the write to land when generation is unchanged")
 	}
@@ -18,10 +18,10 @@ func TestSetSessionIDIfGenGuardsAgainstReset(t *testing.T) {
 	}
 
 	// A turn captures the generation, then /new clears the session mid-turn.
-	gen = s.ClaudeGen()
-	s.ClearClaude() // /new
+	gen = s.ThreadGen()
+	s.ClearThread() // /new
 	if s.GetSessionID() != "" {
-		t.Fatalf("ClearClaude should empty the id, got %q", s.GetSessionID())
+		t.Fatalf("ClearThread should empty the id, got %q", s.GetSessionID())
 	}
 	// The late write from the finishing turn must be rejected, leaving it cleared.
 	if s.SetSessionIDIfGen("sess-2", gen) {

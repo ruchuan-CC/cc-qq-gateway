@@ -1,4 +1,4 @@
-package claude
+package codex
 
 import (
 	"strings"
@@ -7,10 +7,11 @@ import (
 
 func TestConsumeStreamSuccess(t *testing.T) {
 	stream := strings.Join([]string{
-		`{"type":"system","subtype":"init","session_id":"sess-123","tools":["Bash"]}`,
-		`{"type":"assistant","session_id":"sess-123","message":{"content":[{"type":"text","text":"working"},{"type":"tool_use","name":"Bash"}]}}`,
-		`{"type":"assistant","session_id":"sess-123","message":{"content":[{"type":"tool_use","name":"Read"}]}}`,
-		`{"type":"result","subtype":"success","session_id":"sess-123","result":"all done","total_cost_usd":0.04,"num_turns":2,"duration_ms":1500}`,
+		`{"type":"thread.started","thread_id":"thread-123"}`,
+		`{"type":"item.started","item":{"type":"command_execution","command":"go test ./..."}}`,
+		`{"type":"item.started","item":{"type":"mcp_tool_call","name":"docs"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"all done"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":15}}`,
 	}, "\n")
 
 	var tools []string
@@ -25,17 +26,18 @@ func TestConsumeStreamSuccess(t *testing.T) {
 	if res.Text != "all done" {
 		t.Errorf("Text = %q, want %q", res.Text, "all done")
 	}
-	if res.SessionID != "sess-123" || sid != "sess-123" {
-		t.Errorf("session id = %q / %q, want sess-123", res.SessionID, sid)
+	if res.SessionID != "thread-123" || sid != "thread-123" {
+		t.Errorf("session id = %q / %q, want thread-123", res.SessionID, sid)
 	}
-	if res.CostUSD != 0.04 || res.NumTurns != 2 || res.DurationMS != 1500 {
+	if res.InputTokens != 10 || res.CachedInputTokens != 4 || res.OutputTokens != 5 ||
+		res.ReasoningOutputTokens != 2 || res.TotalTokens != 15 {
 		t.Errorf("metadata mismatch: %+v", res)
 	}
 	if len(fallback) != 0 {
 		t.Errorf("unexpected fallback: %q", fallback)
 	}
-	if strings.Join(tools, ",") != "Bash,Read" {
-		t.Errorf("tools = %v, want [Bash Read]", tools)
+	if strings.Join(tools, ",") != "shell,mcp:docs" {
+		t.Errorf("tools = %v, want [shell mcp:docs]", tools)
 	}
 }
 
@@ -43,17 +45,17 @@ func TestConsumeStreamSuccess(t *testing.T) {
 // session id so the caller can resume instead of losing the conversation.
 func TestConsumeStreamKilledKeepsSessionID(t *testing.T) {
 	stream := strings.Join([]string{
-		`{"type":"system","subtype":"init","session_id":"sess-abc"}`,
-		`{"type":"assistant","session_id":"sess-abc","message":{"content":[{"type":"tool_use","name":"Bash"}]}}`,
-		// process killed here — no result event
+		`{"type":"thread.started","thread_id":"thread-abc"}`,
+		`{"type":"item.started","item":{"type":"command_execution","command":"sleep 5"}}`,
+		// process killed here — no turn.completed event
 	}, "\n")
 
 	res, sid, _, _ := consumeStream(strings.NewReader(stream), nil)
 	if res != nil {
 		t.Errorf("expected no result event, got %+v", res)
 	}
-	if sid != "sess-abc" {
-		t.Errorf("session id = %q, want sess-abc", sid)
+	if sid != "thread-abc" {
+		t.Errorf("session id = %q, want thread-abc", sid)
 	}
 }
 
@@ -70,7 +72,10 @@ func TestConsumeStreamFallback(t *testing.T) {
 }
 
 func TestConsumeStreamResultError(t *testing.T) {
-	stream := `{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s","error":"hit the wall"}`
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"s"}`,
+		`{"type":"turn.failed","error":{"message":"hit the wall"}}`,
+	}, "\n")
 	res, _, _, _ := consumeStream(strings.NewReader(stream), nil)
 	if res == nil || !res.IsError {
 		t.Fatalf("expected an error result, got %+v", res)

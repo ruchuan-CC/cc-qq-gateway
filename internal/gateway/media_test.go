@@ -16,7 +16,7 @@ func TestExtractSendDirectivesNone(t *testing.T) {
 }
 
 func TestExtractSendDirectives(t *testing.T) {
-	in := "Here is your chart:\n@@QQ_IMAGE: /home/claude/out.png\nand a log file\n@@QQ_FILE: /tmp/log.txt\n@@QQ_IMAGE: https://example.com/a.jpg"
+	in := "Here is your chart:\n@@QQ_IMAGE: /home/codex/out.png\nand a log file\n@@QQ_FILE: /tmp/log.txt\n@@QQ_IMAGE: https://example.com/a.jpg"
 	out, items := extractSendDirectives(in)
 	if strings.Contains(out, "@@QQ_") {
 		t.Errorf("directives not stripped: %q", out)
@@ -27,7 +27,7 @@ func TestExtractSendDirectives(t *testing.T) {
 	if len(items) != 3 {
 		t.Fatalf("expected 3 items, got %d: %#v", len(items), items)
 	}
-	if items[0].kind != qq.FileTypeImage || items[0].path != "/home/claude/out.png" {
+	if items[0].kind != qq.FileTypeImage || items[0].path != "/home/codex/out.png" {
 		t.Errorf("item0 wrong: %#v", items[0])
 	}
 	if items[1].kind != qq.FileTypeFile || items[1].path != "/tmp/log.txt" {

@@ -14,15 +14,15 @@ import (
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
 )
 
-// ProtocolPrompt is injected into Claude's system prompt on every turn so it
+// ProtocolPrompt is injected into every Codex prompt so it
 // knows how to exchange rich media with the QQ user — giving the QQ surface the
-// same multimodal reach as the Claude app / local Claude Code.
+// same multimodal reach as local Codex.
 const ProtocolPrompt = `You are reachable over QQ, and the gateway gives you full multimodal I/O:
 
 INPUT: When the user sends images or files, the gateway downloads them and lists
 their local paths in the message (under "[Attachments saved locally: ...]"). Use
 the Read tool on those paths to view images or read file contents — treat them
-exactly like attachments in the Claude app.
+exactly like local attachments.
 
 OUTPUT: To send a file or image BACK to the user over QQ, print a line by itself
 in EXACTLY one of these forms (absolute local path or an http(s) URL). The
@@ -31,8 +31,8 @@ gateway removes these lines from your text reply and delivers the media:
   @@QQ_FILE:  /abs/path/or/https/url
   @@QQ_VIDEO: /abs/path/or/https/url
   @@QQ_AUDIO: /abs/path/or/https/url
-For example, after generating a chart at /home/claude/out.png, end your reply with
-a line: @@QQ_IMAGE: /home/claude/out.png
+For example, after generating a chart at /home/codex/out.png, end your reply with
+a line: @@QQ_IMAGE: /home/codex/out.png
 
 Long replies are delivered in full (as an attached file when they exceed the chat
 limit), so you don't need to truncate — but prefer clear, chat-friendly answers.
@@ -48,7 +48,7 @@ FORMATTING (QQ Markdown supports only a specific subset — follow this exactly)
   LINE BREAKS: a bare newline is NOT a reliable line break — to put things on
   separate lines use a blank line between them or a list (- item per line).
   So: present structured data as a heading + a bold-label list (e.g. "## 状态"
-  then "- **模型** opus"); never an aligned grid. For code or any long/program
+  then "- **模型** gpt-5.5"); never an aligned grid. For code or any long/program
   output, send it as a FILE via @@QQ_FILE (don't paste a code block); a tiny
   snippet may go inline as plain text (no backticks). Keep replies skimmable.
 
@@ -112,7 +112,7 @@ func extractSendDirectives(text string) (string, []mediaItem) {
 }
 
 // materializeAttachments downloads inbound attachments to the media dir and
-// returns a note (to append to the prompt) listing their local paths so Claude
+// returns a note (to append to the prompt) listing their local paths so Codex
 // can Read them. Best-effort: download failures fall back to the URL.
 func (g *Gateway) materializeAttachments(ctx context.Context, key string, atts []qq.MessageAttachment) string {
 	if len(atts) == 0 {

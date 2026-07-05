@@ -1,4 +1,4 @@
-// Package session tracks per-conversation Claude Code sessions, resetting them
+// Package session tracks per-conversation Codex threads, resetting them
 // after inactivity and serializing turns within a single conversation.
 package session
 
@@ -9,22 +9,22 @@ import (
 	"time"
 )
 
-// Session holds the Claude session id and bookkeeping for one conversation.
+// Session holds the Codex thread id and bookkeeping for one conversation.
 type Session struct {
 	// Key uniquely identifies the conversation (e.g. "c2c:<openid>").
 	Key string
-	// ClaudeSessionID is the resumable Claude Code session id (empty until the
-	// first turn completes).
-	ClaudeSessionID string
+	// ThreadID is the resumable Codex thread id (empty until the first
+	// turn completes). The field name is kept for state-file compatibility.
+	ThreadID string
 	// LastActive is the time of the last interaction.
 	LastActive time.Time
 	// Model, WorkDir and Mode override the gateway defaults for this conversation
 	// only, driven by /model, /dir and /mode. Empty means "use default".
 	Model   string
-	Effort  string // reasoning effort: low|medium|high|xhigh|max ("" = default)
+	Effort  string // reasoning effort: minimal|low|medium|high|xhigh ("" = default)
 	WorkDir string
 	Mode    string // permission mode: default|plan|acceptEdits|bypass
-	// Turns counts completed Claude turns in this conversation.
+	// Turns counts completed Codex turns in this conversation.
 	Turns int
 	// TimeoutMin, when >0, overrides the configured per-turn timeout (minutes)
 	// for this conversation, driven by /timeout.
@@ -42,9 +42,7 @@ type Session struct {
 	running    bool
 	startedAt  time.Time // when the in-flight turn began, for /status elapsed time
 	lastPrompt string    // last user message, for /retry
-	lastCost   float64   // last turn cost (USD), for /cost
-	lastDurMS  int       // last turn duration (ms), for /cost
-	thinkNext  bool      // next turn uses extended thinking, set by /think
+	thinkNext  bool      // next turn uses xhigh effort, set by /think
 	idleReset  bool      // an idle-TTL reset cleared the context since last checked
 	// seed, when non-empty, is prepended to the next fresh (non-resuming) turn's
 	// prompt — the handoff summary /compact produces so a compacted conversation
@@ -56,14 +54,16 @@ type Session struct {
 	lastTool   string
 	toolCalls  int
 	lastToolAt time.Time
+	lastUsage  Usage
+	lastError  LastError
 	// resumeChoices holds the session ids last shown by /resume (no argument), so
 	// a follow-up "/resume 2" can pick by number. Ephemeral; not persisted.
 	resumeChoices []string
-	// claudeGen bumps every time the resumable session id is cleared (/new, idle
+	// threadGen bumps every time the resumable thread id is cleared (/new, idle
 	// reset). A turn captures it at start and only writes back its session id if the
 	// generation still matches, so a turn that finished at the same instant /new
 	// reset the conversation can't resurrect the just-cleared context.
-	claudeGen uint64
+	threadGen uint64
 
 	// pending holds replies that could not be delivered live (e.g. a long turn
 	// finished after QQ's passive-reply window expired and active push was
@@ -76,9 +76,26 @@ type Session struct {
 	// 40054005 ("消息被去重，请检查请求msgseq"), so the counter must be shared across
 	// ALL responders for this user (consecutive turns, active pushes, the notify
 	// endpoint) — a per-responder counter that restarts at 0 each message collides.
-	// It deliberately survives /new and idle resets (only the Claude session id is
+	// It deliberately survives /new and idle resets (only the Codex thread id is
 	// cleared) so the sequence never goes backwards while the process lives.
 	seqCounter atomic.Int64
+}
+
+// Usage is the most recent completed Codex turn's token/latency snapshot.
+type Usage struct {
+	At                    time.Time
+	Duration              time.Duration
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningOutputTokens int
+	TotalTokens           int
+}
+
+// LastError is the most recent failed Codex turn snapshot.
+type LastError struct {
+	At      time.Time
+	Message string
 }
 
 // NextSeq returns the next monotonic msg_seq for a reply to this conversation.
@@ -105,15 +122,49 @@ func (s *Session) TakePending() []string {
 	return p
 }
 
-// RecordTurn stores bookkeeping from a completed turn for /retry and /cost.
-func (s *Session) RecordTurn(prompt string, costUSD float64, durMS int) {
+// RecordTurn stores bookkeeping from a completed turn for /retry.
+func (s *Session) RecordTurn(prompt string) {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
 	if prompt != "" {
 		s.lastPrompt = prompt
 	}
-	s.lastCost = costUSD
-	s.lastDurMS = durMS
+}
+
+// RecordUsage stores the most recent completed turn's token usage for /usage.
+func (s *Session) RecordUsage(input, cached, output, reasoning, total int, duration time.Duration) {
+	s.ctrl.Lock()
+	s.lastUsage = Usage{
+		At:                    time.Now(),
+		Duration:              duration,
+		InputTokens:           input,
+		CachedInputTokens:     cached,
+		OutputTokens:          output,
+		ReasoningOutputTokens: reasoning,
+		TotalTokens:           total,
+	}
+	s.ctrl.Unlock()
+}
+
+// LastUsage returns the most recent completed turn's token usage, if any.
+func (s *Session) LastUsage() Usage {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.lastUsage
+}
+
+// RecordError stores the most recent failed Codex turn for /usage diagnostics.
+func (s *Session) RecordError(msg string) {
+	s.ctrl.Lock()
+	s.lastError = LastError{At: time.Now(), Message: msg}
+	s.ctrl.Unlock()
+}
+
+// LastError returns the most recent failed Codex turn, if any.
+func (s *Session) LastError() LastError {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.lastError
 }
 
 // LastPrompt returns the last user message (for /retry).
@@ -123,14 +174,7 @@ func (s *Session) LastPrompt() string {
 	return s.lastPrompt
 }
 
-// LastStats returns the last turn's cost (USD) and duration (ms).
-func (s *Session) LastStats() (float64, int) {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.lastCost, s.lastDurMS
-}
-
-// SetThinkNext marks the next turn to use extended thinking.
+// SetThinkNext marks the next turn to use xhigh effort.
 func (s *Session) SetThinkNext() {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
@@ -230,14 +274,14 @@ func (s *Session) ResumeChoice(n int) string {
 	return s.resumeChoices[n-1]
 }
 
-// AttachSession switches this conversation to an existing Claude session id
+// AttachSession switches this conversation to an existing Codex thread id
 // (/resume). It bumps the generation so an in-flight turn from the previous
 // context can't write its session id over the one we just attached, and clears
 // any pending compact seed (the resumed session carries its own context).
 func (s *Session) AttachSession(id string) {
 	s.ctrl.Lock()
-	s.claudeGen++
-	s.ClaudeSessionID = id
+	s.threadGen++
+	s.ThreadID = id
 	s.seed = ""
 	s.ctrl.Unlock()
 }
@@ -296,8 +340,8 @@ func (s *Session) Running() bool {
 	return s.running
 }
 
-// The per-conversation override fields (Model/WorkDir/Mode) and the Claude
-// session bookkeeping (ClaudeSessionID/Turns) are mutated by control
+// The per-conversation override fields (Model/WorkDir/Mode) and the Codex
+// thread bookkeeping (ThreadID/Turns) are mutated by control
 // commands (/model, /dir, /mode, /new) and the idle-reset path WHILE a turn is
 // concurrently reading them under mu. They are therefore guarded by ctrl (the
 // same lock /stop uses), so a command can update them while mu is held by a turn
@@ -319,20 +363,20 @@ func (s *Session) SetWorkDir(v string) { s.ctrl.Lock(); s.WorkDir = v; s.ctrl.Un
 func (s *Session) GetMode() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Mode }
 func (s *Session) SetMode(v string) { s.ctrl.Lock(); s.Mode = v; s.ctrl.Unlock() }
 
-// GetSessionID / SetSessionID get/set the resumable Claude session id.
+// GetSessionID / SetSessionID get/set the resumable Codex thread id.
 func (s *Session) GetSessionID() string {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
-	return s.ClaudeSessionID
+	return s.ThreadID
 }
-func (s *Session) SetSessionID(v string) { s.ctrl.Lock(); s.ClaudeSessionID = v; s.ctrl.Unlock() }
+func (s *Session) SetSessionID(v string) { s.ctrl.Lock(); s.ThreadID = v; s.ctrl.Unlock() }
 
-// ClaudeGen returns the current session generation (see the claudeGen field). A
+// ThreadGen returns the current session generation (see the threadGen field). A
 // turn captures it before running and passes it to SetSessionIDIfGen.
-func (s *Session) ClaudeGen() uint64 {
+func (s *Session) ThreadGen() uint64 {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
-	return s.claudeGen
+	return s.threadGen
 }
 
 // SetSessionIDIfGen sets the resumable session id only if the generation still
@@ -342,10 +386,10 @@ func (s *Session) ClaudeGen() uint64 {
 func (s *Session) SetSessionIDIfGen(v string, gen uint64) bool {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
-	if s.claudeGen != gen {
+	if s.threadGen != gen {
 		return false
 	}
-	s.ClaudeSessionID = v
+	s.ThreadID = v
 	return true
 }
 
@@ -355,19 +399,19 @@ func (s *Session) IncTurn() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); s.Turns+
 // TurnCount returns the completed-turn count.
 func (s *Session) TurnCount() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Turns }
 
-// HasSession reports whether a resumable Claude session id is set.
+// HasSession reports whether a resumable Codex thread id is set.
 func (s *Session) HasSession() bool {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
-	return s.ClaudeSessionID != ""
+	return s.ThreadID != ""
 }
 
-// ClearClaude clears the resumable session id, starting a fresh Claude
-// conversation on the next turn.
-func (s *Session) ClearClaude() {
+// ClearThread clears the resumable Codex thread id, starting a fresh
+// conversation on the next turn. The method name is kept for compatibility.
+func (s *Session) ClearThread() {
 	s.ctrl.Lock()
-	s.ClaudeSessionID = ""
-	s.claudeGen++
+	s.ThreadID = ""
+	s.threadGen++
 	s.ctrl.Unlock()
 }
 
@@ -389,8 +433,8 @@ func NewManager(idleTTL time.Duration) *Manager {
 }
 
 // Get returns (creating if needed) the session for a conversation key. If the
-// existing session has been idle past the TTL it is reset (a fresh Claude
-// session will be started on the next turn).
+// existing session has been idle past the TTL it is reset (a fresh Codex thread
+// will be started on the next turn).
 func (m *Manager) Get(key string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -408,13 +452,13 @@ func (m *Manager) Get(key string) *Session {
 		if s.HasSession() {
 			s.markIdleReset()
 		}
-		s.ClearClaude()
+		s.ClearThread()
 	}
 	s.LastActive = now
 	return s
 }
 
-// Reset clears the Claude session id for a conversation, starting fresh on the
+// Reset clears the Codex thread id for a conversation, starting fresh on the
 // next turn. Returns false if no session existed.
 func (m *Manager) Reset(key string) bool {
 	m.mu.Lock()
@@ -423,14 +467,14 @@ func (m *Manager) Reset(key string) bool {
 	if !ok {
 		return false
 	}
-	s.ClearClaude()
+	s.ClearThread()
 	return true
 }
 
 // Summary is a point-in-time view of a conversation, for status commands.
 type Summary struct {
 	Key        string
-	Active     bool // has a Claude session id
+	Active     bool // has a Codex thread id
 	Running    bool // a turn is in flight
 	Turns      int
 	LastActive time.Time

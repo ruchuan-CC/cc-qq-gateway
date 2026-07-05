@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// An idle-TTL reset must be flagged exactly once, and only when a live Claude
+// An idle-TTL reset must be flagged exactly once, and only when a live Codex
 // context was actually lost.
 func TestIdleResetFlag(t *testing.T) {
 	m := NewManager(time.Millisecond)
@@ -23,7 +23,7 @@ func TestIdleResetFlag(t *testing.T) {
 		t.Fatalf("expected the same session object")
 	}
 	if s2.GetSessionID() != "" {
-		t.Fatalf("idle reset should clear the Claude session id")
+		t.Fatalf("idle reset should clear the Codex thread id")
 	}
 	if !s2.TakeIdleReset() {
 		t.Fatalf("idle reset of a live context must set the flag")
@@ -33,7 +33,7 @@ func TestIdleResetFlag(t *testing.T) {
 	}
 }
 
-// Resetting an already-fresh session (no Claude context) must not nag.
+// Resetting an already-fresh session (no Codex context) must not nag.
 func TestIdleResetFlagNotSetWithoutContext(t *testing.T) {
 	m := NewManager(time.Millisecond)
 	s := m.Get("c2c:u2")
@@ -53,8 +53,8 @@ func TestExplicitClearDoesNotFlag(t *testing.T) {
 	m := NewManager(0)
 	s := m.Get("c2c:u3")
 	s.SetSessionID("sess-3")
-	s.ClearClaude()
+	s.ClearThread()
 	if s.TakeIdleReset() {
-		t.Fatalf("ClearClaude must not set the idle-reset flag")
+		t.Fatalf("ClearThread must not set the idle-reset flag")
 	}
 }

@@ -7,64 +7,60 @@ import (
 	"testing"
 )
 
-func TestProjectSlug(t *testing.T) {
-	for in, want := range map[string]string{
-		"/home/claude":                   "-home-claude",
-		"/home/claude/anything/OkxForAI": "-home-claude-anything-OkxForAI",
-		"/tmp/a.b_c":                     "-tmp-a-b-c",
-	} {
-		if got := projectSlug(in); got != want {
-			t.Errorf("projectSlug(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// fixture is a minimal CLI transcript: a user prompt, an assistant tool_use, a
-// tool_result-only user line, a sidechain line, an ai-title, and the reply.
-const fixture = `{"type":"user","isSidechain":false,"timestamp":"2026-07-02T03:00:00.000Z","message":{"role":"user","content":"帮我看下磁盘"}}
-{"type":"assistant","isSidechain":false,"timestamp":"2026-07-02T03:00:05.000Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}},{"type":"tool_use","name":"Bash","input":{}}]}}
-{"type":"user","isSidechain":false,"timestamp":"2026-07-02T03:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"..."}]}}
-{"type":"assistant","isSidechain":true,"timestamp":"2026-07-02T03:00:07.000Z","message":{"role":"assistant","content":[{"type":"text","text":"sidechain noise"}]}}
-{"type":"ai-title","aiTitle":"磁盘检查"}
-{"type":"assistant","isSidechain":false,"timestamp":"2026-07-02T03:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"磁盘使用 26%，很健康。"}]}}
+const codexFixture = `{"timestamp":"2026-07-05T17:28:34.403Z","type":"session_meta","payload":{"session_id":"019f3353-22e9-7940-9fa9-199fe918d6d2","cwd":"/tmp/project","timestamp":"2026-07-05T17:28:34.294Z"}}
+{"timestamp":"2026-07-05T17:28:35.138Z","type":"event_msg","payload":{"type":"user_message","message":"帮我看下磁盘\n第二行"}}
+{"timestamp":"2026-07-05T17:28:37.016Z","type":"event_msg","payload":{"type":"agent_message","message":"ok"}}
 `
 
-func writeFixture(t *testing.T) string {
+func writeCodexFixture(t *testing.T, root string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "abcd1234-0000.jsonl")
-	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+	dir := filepath.Join(root, "2026", "07", "05")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-07-05T17-28-34-019f3353-22e9-7940-9fa9-199fe918d6d2.jsonl")
+	if err := os.WriteFile(path, []byte(codexFixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestRenderTranscript(t *testing.T) {
-	md, count, err := renderTranscript(writeFixture(t), "abcd1234-0000")
-	if err != nil {
-		t.Fatal(err)
+func TestReadSessionInfo(t *testing.T) {
+	path := writeCodexFixture(t, t.TempDir())
+	info, ok := readSessionInfo(path, "/tmp/project")
+	if !ok {
+		t.Fatal("expected session info")
 	}
-	if count != 2 {
-		t.Errorf("count = %d, want 2 (user + assistant)", count)
+	if info.ID != "019f3353-22e9-7940-9fa9-199fe918d6d2" {
+		t.Errorf("id = %q", info.ID)
 	}
-	for _, want := range []string{"帮我看下磁盘", "磁盘使用 26%", "Bash ×2", "👤", "🤖"} {
-		if !strings.Contains(md, want) {
-			t.Errorf("transcript missing %q", want)
-		}
+	if info.Title != "帮我看下磁盘" {
+		t.Errorf("title = %q", info.Title)
 	}
-	if strings.Contains(md, "sidechain noise") {
-		t.Error("sidechain content must be excluded")
-	}
-}
-
-func TestSessionTitlePrefersAITitle(t *testing.T) {
-	if got := sessionTitle(writeFixture(t)); got != "磁盘检查" {
-		t.Errorf("title = %q, want 磁盘检查", got)
+	if info.Modified.IsZero() {
+		t.Error("modified time should be set")
 	}
 }
 
-func TestSummarizeTools(t *testing.T) {
-	got := summarizeTools([]string{"Bash", "Read", "Bash", "Bash"})
-	if got != "Bash ×3, Read" {
-		t.Errorf("summarizeTools = %q", got)
+func TestReadSessionInfoFiltersCWD(t *testing.T) {
+	path := writeCodexFixture(t, t.TempDir())
+	if _, ok := readSessionInfo(path, "/tmp/other"); ok {
+		t.Fatal("session from another cwd should be filtered")
+	}
+}
+
+func TestIDFromRolloutName(t *testing.T) {
+	got := idFromRolloutName("rollout-2026-07-05T17-28-34-019f3353-22e9-7940-9fa9-199fe918d6d2.jsonl")
+	if got != "019f3353-22e9-7940-9fa9-199fe918d6d2" {
+		t.Errorf("id = %q", got)
+	}
+}
+
+func TestFirstLine(t *testing.T) {
+	if got := firstLine(" a\nb "); got != "a" {
+		t.Errorf("firstLine = %q", got)
+	}
+	if strings.TrimSpace(firstLine("")) != "" {
+		t.Error("empty firstLine should stay empty")
 	}
 }

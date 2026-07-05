@@ -16,13 +16,13 @@ func TestStateRoundTrip(t *testing.T) {
 	m1.SetStatePath(path)
 	s := m1.Get("c2c:user1")
 	s.SetSessionID("sess-abc")
-	s.SetModel("opus")
+	s.SetModel("gpt-5.5")
 	s.SetWorkDir("/tmp/w")
 	s.SetMode("plan")
 	s.SetTimeoutMin(45)
 	s.IncTurn()
 	s.IncTurn()
-	s.RecordTurn("上一条消息", 0.12, 3400)
+	s.RecordTurn("上一条消息")
 	s.SetSeed("压缩摘要内容")
 	s.QueuePending("排队中的回复")
 	for i := 0; i < 7; i++ {
@@ -41,7 +41,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if got := r.GetSessionID(); got != "sess-abc" {
 		t.Errorf("session id = %q", got)
 	}
-	if r.GetModel() != "opus" || r.GetWorkDir() != "/tmp/w" || r.GetMode() != "plan" {
+	if r.GetModel() != "gpt-5.5" || r.GetWorkDir() != "/tmp/w" || r.GetMode() != "plan" {
 		t.Errorf("overrides = %q %q %q", r.GetModel(), r.GetWorkDir(), r.GetMode())
 	}
 	if r.GetTimeoutMin() != 45 {
@@ -114,7 +114,7 @@ func TestSeedTakeOnce(t *testing.T) {
 // overwriting the attached session id.
 func TestAttachSessionBumpsGen(t *testing.T) {
 	s := &Session{}
-	gen := s.ClaudeGen()
+	gen := s.ThreadGen()
 	s.AttachSession("newid")
 	if s.SetSessionIDIfGen("stale-write", gen) {
 		t.Error("stale generation write must be rejected after AttachSession")

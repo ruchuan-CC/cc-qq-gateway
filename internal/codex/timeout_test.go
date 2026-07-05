@@ -1,4 +1,4 @@
-package claude
+package codex
 
 import (
 	"context"
@@ -14,9 +14,9 @@ import (
 // instead of a raw "signal: killed".
 func TestRunReportsTurnTimeout(t *testing.T) {
 	dir := t.TempDir()
-	slow := filepath.Join(dir, "slow-claude")
-	// A stand-in binary that emits a session id event then outlives the timeout.
-	script := "#!/bin/sh\necho '{\"type\":\"system\",\"session_id\":\"sess-slow\"}'\nsleep 5\n"
+	slow := filepath.Join(dir, "slow-codex")
+	// A stand-in binary that emits a thread id event then outlives the timeout.
+	script := "#!/bin/sh\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-slow\"}'\nsleep 5\n"
 	if err := os.WriteFile(slow, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestRunReportsTurnTimeout(t *testing.T) {
 	if !errors.Is(err, ErrTurnTimeout) {
 		t.Fatalf("expected ErrTurnTimeout, got %v", err)
 	}
-	if res == nil || res.SessionID != "sess-slow" {
+	if res == nil || res.SessionID != "thread-slow" {
 		t.Fatalf("the session id seen mid-stream must survive for resume, got %+v", res)
 	}
 }
@@ -38,7 +38,7 @@ func TestRunReportsTurnTimeout(t *testing.T) {
 // reported as one.
 func TestRunCancelIsNotTimeout(t *testing.T) {
 	dir := t.TempDir()
-	slow := filepath.Join(dir, "slow-claude")
+	slow := filepath.Join(dir, "slow-codex")
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

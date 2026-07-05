@@ -11,11 +11,11 @@ func TestCommandAliasesResolveToKnownHandlers(t *testing.T) {
 	known := map[string]bool{
 		"new": true, "retry": true, "stop": true,
 		"model": true, "effort": true, "think": true, "dir": true, "mode": true,
-		"agents": true, "mcp": true, "memory": true, "doctor": true,
+		"mcp": true, "doctor": true,
 		"review": true, "diff": true, "explain": true, "web": true, "init": true,
-		"usage": true, "cost": true, "status": true, "help": true,
+		"status": true, "help": true,
 		"whoami": true, "sessions": true, "version": true, "ping": true,
-		"compact": true, "export": true, "resume": true, "timeout": true,
+		"compact": true, "resume": true, "timeout": true, "usage": true,
 	}
 	seen := map[string]bool{}
 	for alias, canon := range commandAliases {
@@ -35,9 +35,9 @@ func TestCommandAliasesResolveToKnownHandlers(t *testing.T) {
 func TestHelpTextListsCoreCommands(t *testing.T) {
 	for _, want := range []string{
 		"/new", "/retry", "/stop", "/model", "/think", "/dir", "/mode",
-		"/agents", "/mcp", "/memory", "/doctor", "/review", "/diff", "/explain", "/web", "/init",
-		"/usage", "/cost", "/status", "/help", "/whoami", "/sessions", "/version",
-		"/compact", "/export", "/resume", "/timeout",
+		"/mcp", "/doctor", "/review", "/diff", "/explain", "/web", "/init",
+		"/status", "/help", "/whoami", "/sessions", "/version",
+		"/compact", "/resume", "/timeout", "/usage",
 	} {
 		if !strings.Contains(helpText, want) {
 			t.Errorf("helpText missing %q", want)

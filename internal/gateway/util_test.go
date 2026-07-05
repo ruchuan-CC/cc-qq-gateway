@@ -12,7 +12,7 @@ func TestCleanContent(t *testing.T) {
 		"plain message":               "plain message",
 		"<emoji:4> hi <@!1> <@2> bye": "hi   bye",
 		"／help":                       "/help", // full-width slash folds to a command
-		"／model opus":                 "/model opus",
+		"／model gpt-5.5":              "/model gpt-5.5",
 	}
 	for in, want := range cases {
 		if got := cleanContent(in); got != want {

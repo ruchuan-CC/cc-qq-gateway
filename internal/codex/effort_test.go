@@ -1,4 +1,4 @@
-package claude
+package codex
 
 import "testing"
 
@@ -8,6 +8,8 @@ func TestNormalizeEffort(t *testing.T) {
 		want string
 		ok   bool
 	}{
+		{"minimal", "minimal", true},
+		{"min", "minimal", true},
 		{"low", "low", true},
 		{"LOW", "low", true},
 		{" high ", "high", true},
@@ -16,9 +18,9 @@ func TestNormalizeEffort(t *testing.T) {
 		{"xhigh", "xhigh", true},
 		{"x-high", "xhigh", true},
 		{"extra", "xhigh", true},
-		{"max", "max", true},
-		{"default", "", true}, // clears the override
-		{"", "", true},        // clears the override
+		{"max", "xhigh", true}, // legacy alias
+		{"default", "", true},  // clears the override
+		{"", "", true},         // clears the override
 		{"默认", "", true},
 		{"turbo", "", false}, // unknown level
 		{"9000", "", false},

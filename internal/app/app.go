@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/chenhg5/cc-qq-gateway/internal/claude"
+	"github.com/chenhg5/cc-qq-gateway/internal/codex"
 	"github.com/chenhg5/cc-qq-gateway/internal/config"
 	"github.com/chenhg5/cc-qq-gateway/internal/gateway"
 	"github.com/chenhg5/cc-qq-gateway/internal/qq"
@@ -35,26 +35,33 @@ func New(cfg *config.Config, logger *log.Logger) *App {
 		ClientSecret: cfg.QQ.ClientSecret,
 		Sandbox:      cfg.QQ.Sandbox,
 	})
-	// Normalize a config-provided model the same way /model does, so a display name
-	// in config.toml (e.g. "Opus 4.8 (1M context)") becomes a CLI-valid id instead
-	// of failing every turn. An unrecognized value is left as-is for the CLI to judge.
-	defaultModel := cfg.Claude.Model
-	if norm, ok := claude.NormalizeModel(defaultModel); ok {
+	// Normalize a config-provided model the same way /model does. Retired provider
+	// model names are cleared so a stale config cannot wedge all future turns.
+	defaultModel := cfg.Codex.Model
+	if norm, ok := codex.NormalizeModel(defaultModel); ok {
 		defaultModel = norm
+	} else {
+		defaultModel = ""
 	}
-	bridge := claude.New(claude.Config{
-		Binary:                     cfg.Claude.Binary,
-		WorkDir:                    cfg.Claude.WorkDir,
+	defaultEffort := cfg.Codex.Effort
+	if norm, ok := codex.NormalizeEffort(defaultEffort); ok {
+		defaultEffort = norm
+	}
+	bridge := codex.New(codex.Config{
+		Binary:                     cfg.Codex.Binary,
+		WorkDir:                    cfg.Codex.WorkDir,
 		Model:                      defaultModel,
-		PermissionMode:             cfg.Claude.PermissionMode,
-		DangerouslySkipPermissions: cfg.Claude.DangerouslySkipPermissions,
-		AllowedTools:               cfg.Claude.AllowedTools,
-		DisallowedTools:            cfg.Claude.DisallowedTools,
-		AppendSystemPrompt:         cfg.Claude.AppendSystemPrompt,
+		Effort:                     defaultEffort,
+		PermissionMode:             cfg.Codex.PermissionMode,
+		Sandbox:                    cfg.Codex.Sandbox,
+		ApprovalPolicy:             cfg.Codex.ApprovalPolicy,
+		DangerouslySkipPermissions: cfg.Codex.DangerouslySkipPermissions,
+		WebSearch:                  cfg.Codex.WebSearch,
+		AppendSystemPrompt:         cfg.Codex.AppendSystemPrompt,
 		ProtocolPrompt:             gateway.ProtocolPrompt,
-		AddDirs:                    cfg.Claude.AddDirs,
-		ExtraArgs:                  cfg.Claude.ExtraArgs,
-		Timeout:                    cfg.ClaudeTimeout(),
+		AddDirs:                    cfg.Codex.AddDirs,
+		ExtraArgs:                  cfg.Codex.ExtraArgs,
+		Timeout:                    cfg.CodexTimeout(),
 	})
 	sessions := session.NewManager(cfg.SessionIdleTTL())
 	sessions.SetStatePath(cfg.Gateway.StatePath)
