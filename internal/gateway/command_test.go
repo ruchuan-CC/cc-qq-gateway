@@ -10,7 +10,7 @@ import (
 func TestCommandAliasesResolveToKnownHandlers(t *testing.T) {
 	known := map[string]bool{
 		"new": true, "retry": true, "stop": true,
-		"model": true, "think": true, "dir": true, "mode": true,
+		"model": true, "effort": true, "think": true, "dir": true, "mode": true,
 		"agents": true, "mcp": true, "memory": true, "doctor": true,
 		"review": true, "diff": true, "explain": true, "web": true, "init": true,
 		"usage": true, "cost": true, "status": true, "help": true,

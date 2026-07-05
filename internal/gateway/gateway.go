@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the gateway build version, surfaced via /version.
-const Version = "0.5.2"
+const Version = "0.6.0"
 
 // Gateway is the central orchestrator.
 type Gateway struct {
@@ -267,6 +267,8 @@ func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, text str
 		_ = r.Send(ctx, "✅ **已开启新对话**，上下文已清空。")
 	case "model":
 		g.cmdModel(ctx, r, key, arg)
+	case "effort":
+		g.cmdEffort(ctx, r, key, arg)
 	case "dir":
 		g.cmdCwd(ctx, r, key, arg)
 	case "mode":
@@ -367,7 +369,14 @@ const modelHint = "可切换模型（用全名）：claude-fable-5 / claude-opus
 // unrecognized name is rejected instead of being stored and wedging every turn.
 func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 	sess := g.sessions.Get(key)
-	if strings.TrimSpace(arg) == "" {
+	arg = strings.TrimSpace(arg)
+	// `/model effort [level]` is a sub-command for the reasoning-effort override,
+	// so effort can be driven from /model as well as the standalone /effort.
+	if f := strings.Fields(arg); len(f) > 0 && strings.EqualFold(f[0], "effort") {
+		g.cmdEffort(ctx, r, key, strings.TrimSpace(arg[len(f[0]):]))
+		return
+	}
+	if arg == "" {
 		cur := sess.GetModel()
 		if cur == "" {
 			cur = g.bridge.DefaultModel()
@@ -376,10 +385,20 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 			}
 			cur += "（默认）"
 		}
+		eff := sess.GetEffort()
+		if eff == "" {
+			if d := g.bridge.DefaultEffort(); d != "" {
+				eff = d + "（默认）"
+			} else {
+				eff = "默认"
+			}
+		}
 		_ = r.Send(ctx, "## 🧠 模型\n\n"+kvLines([][2]string{
-			{"当前", cur},
+			{"当前模型", cur},
+			{"思考强度", eff},
 		})+"\n\n**可切换模型（用全名）**\n"+modelListLines()+
-			"\n\n直接 /model <全名> 即可切换，如 **/model claude-fable-5**　恢复默认：/model default")
+			"\n\n切换模型：/model <全名>，如 **/model claude-fable-5**（default 恢复默认）"+
+			"\n设置强度：**/effort <low|medium|high|xhigh|max>**（default 恢复默认）")
 		return
 	}
 	canon, ok := claude.NormalizeModel(arg)
@@ -394,6 +413,40 @@ func (g *Gateway) cmdModel(ctx context.Context, r *responder, key, arg string) {
 		return
 	}
 	_ = r.Send(ctx, "🧠 模型已切换为 **"+canon+"**")
+}
+
+// cmdEffort shows or sets the per-conversation reasoning-effort override, wired
+// to the Claude CLI's --effort flag (low/medium/high/xhigh/max). Empty/"default"
+// clears it back to the CLI default.
+func (g *Gateway) cmdEffort(ctx context.Context, r *responder, key, arg string) {
+	sess := g.sessions.Get(key)
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		cur := sess.GetEffort()
+		if cur == "" {
+			if d := g.bridge.DefaultEffort(); d != "" {
+				cur = d + "（默认）"
+			} else {
+				cur = "默认（未设置）"
+			}
+		}
+		_ = r.Send(ctx, "## ⚙️ 思考强度 · effort\n\n"+kvLines([][2]string{
+			{"当前", cur},
+		})+"\n\n可选等级：low / medium / high / xhigh / max\n设置：/effort <等级>（或 /model effort <等级>）　恢复默认：/effort default")
+		return
+	}
+	lvl, ok := claude.NormalizeEffort(arg)
+	if !ok {
+		_ = r.Send(ctx, "⚠️ 无法识别的强度 "+arg+"。可选：low / medium / high / xhigh / max（default 恢复默认）")
+		return
+	}
+	sess.SetEffort(lvl)
+	g.persist()
+	if lvl == "" {
+		_ = r.Send(ctx, "**⚙️ 思考强度** 已恢复默认。")
+		return
+	}
+	_ = r.Send(ctx, "⚙️ 思考强度已设为 **"+lvl+"**")
 }
 
 // cmdCwd shows or sets the per-conversation working directory override.
@@ -637,6 +690,7 @@ func (g *Gateway) cmdCompact(r *responder, key, focus string) {
 		SessionID:      sess.GetSessionID(),
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
+		Effort:         sess.GetEffort(),
 		WorkDir:        sess.GetWorkDir(),
 		PermissionMode: sess.GetMode(),
 		Timeout:        10 * time.Minute,
@@ -768,27 +822,56 @@ func (g *Gateway) usageText() string {
 		turns, cost := g.usageSnapshot()
 		return fmt.Sprintf("**📊 用量**\n订阅用量获取失败：%s\n本网关累计 %d 轮 · $%.4f", short(err.Error()), turns, cost)
 	}
-	rows := make([][2]string, 0, 4)
-	addWindow := func(label string, w claude.Window) {
-		if !w.Has {
-			return
+	rows := make([][2]string, 0, len(u.Limits)+2)
+	for _, w := range u.Limits {
+		val := fmt.Sprintf("%.0f%%", w.Percent)
+		if w.Severity != "" && w.Severity != "normal" {
+			val += " ⚠️"
 		}
-		val := fmt.Sprintf("%.0f%%", w.Utilization)
 		if !w.ResetsAt.IsZero() {
 			val += fmt.Sprintf(" · %s后重置（%s）", humanDur(time.Until(w.ResetsAt)), w.ResetsAt.In(displayZone).Format("01-02 15:04"))
 		}
-		rows = append(rows, [2]string{label, val})
+		rows = append(rows, [2]string{limitLabel(w), val})
 	}
-	addWindow("5 小时", u.FiveHour)
-	addWindow("7 天", u.SevenDay)
-	addWindow("Opus·7天", u.Opus)
-	addWindow("Sonnet·7天", u.Sonnet)
+	if u.ExtraEnabled {
+		rows = append(rows, [2]string{"额外credits", fmt.Sprintf("%.0f%%", u.ExtraPercent)})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, [2]string{"额度", "暂无数据"})
+	}
+	turns, cost := g.usageSnapshot()
+	rows = append(rows, [2]string{"本网关累计", fmt.Sprintf("%d 轮 · $%.4f", turns, cost)})
 
 	head := "## 📊 订阅用量"
 	if u.Plan != "" {
 		head += " · " + prettyPlan(u.Plan)
 	}
 	return head + "\n\n" + kvLines(rows)
+}
+
+// limitLabel gives a short Chinese label for one usage limit window.
+func limitLabel(w claude.Limit) string {
+	if w.Scope != "" {
+		return "本周·" + w.Scope
+	}
+	switch w.Kind {
+	case "session":
+		return "会话(5h)"
+	case "weekly_all":
+		return "本周(全部)"
+	case "weekly_scoped":
+		return "本周(限定)"
+	}
+	switch w.Group {
+	case "session":
+		return "会话(5h)"
+	case "weekly":
+		return "本周"
+	}
+	if w.Kind != "" {
+		return w.Kind
+	}
+	return "额度"
 }
 
 func humanDur(d time.Duration) string {
@@ -834,6 +917,12 @@ func (g *Gateway) statusText(key string) string {
 			model = "默认"
 		}
 	}
+	effort := s.GetEffort()
+	if effort == "" {
+		if effort = g.bridge.DefaultEffort(); effort == "" {
+			effort = "默认"
+		}
+	}
 	workDir := s.GetWorkDir()
 	if workDir == "" {
 		workDir = g.bridge.DefaultWorkDir()
@@ -861,6 +950,7 @@ func (g *Gateway) statusText(key string) string {
 	rows := [][2]string{
 		{"会话", status},
 		{"模型", model},
+		{"强度", effort},
 		{"目录", workDir},
 		{"权限", authority},
 		{"任务", running},
@@ -919,6 +1009,7 @@ var commandAliases = map[string]string{
 	"/export": "export", "导出": "export", "导出对话": "export",
 	// configuration
 	"/model": "model", "模型": "model",
+	"/effort": "effort", "强度": "effort", "思考强度": "effort", "等级": "effort",
 	"/think": "think", "深度思考": "think", "思考": "think",
 	"/dir": "dir", "/cd": "dir", "/cwd": "dir", "/pwd": "dir", "目录": "dir",
 	"/mode": "mode", "权限": "mode", "模式": "mode",
@@ -974,6 +1065,7 @@ var helpGroups = []helpGroup{
 	}},
 	{"⚙️ 配置", []helpCommand{
 		{"/model", "切换模型", "看当前与可选模型；/model <全名> 切换，default 恢复"},
+		{"/effort", "思考强度", "low/medium/high/xhigh/max；/effort <等级> 设置，default 恢复"},
 		{"/think", "深度思考", "下一条回复用深度思考"},
 		{"/dir", "工作目录", "/dir <路径> 切换，default 恢复"},
 		{"/mode", "权限模式", "default / plan / acceptEdits / bypass"},
@@ -1178,6 +1270,7 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, text string, a
 		SessionID:      resuming,
 		Prompt:         prompt,
 		Model:          sess.GetModel(),
+		Effort:         sess.GetEffort(),
 		WorkDir:        sess.GetWorkDir(),
 		PermissionMode: sess.GetMode(),
 		Timeout:        timeout,

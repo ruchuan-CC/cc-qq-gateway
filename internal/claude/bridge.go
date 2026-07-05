@@ -33,6 +33,9 @@ type Config struct {
 	WorkDir string
 	// Model overrides the model (e.g. "claude-opus-4-8"); empty = CLI default.
 	Model string
+	// Effort sets the reasoning effort level via --effort (low/medium/high/
+	// xhigh/max); empty = CLI default.
+	Effort string
 	// PermissionMode is passed via --permission-mode (default / acceptEdits /
 	// plan / bypassPermissions). Empty leaves the CLI default.
 	PermissionMode string
@@ -77,6 +80,9 @@ func (b *Bridge) DefaultWorkDir() string { return b.cfg.WorkDir }
 // DefaultModel reports the bridge's configured model ("" means CLI default).
 func (b *Bridge) DefaultModel() string { return b.cfg.Model }
 
+// DefaultEffort reports the bridge's configured effort ("" means CLI default).
+func (b *Bridge) DefaultEffort() string { return b.cfg.Effort }
+
 // DefaultTimeout reports the configured per-turn timeout.
 func (b *Bridge) DefaultTimeout() time.Duration { return b.cfg.Timeout }
 
@@ -113,6 +119,7 @@ type Request struct {
 	SessionID string
 	Prompt    string
 	Model     string // overrides Config.Model when non-empty
+	Effort    string // overrides Config.Effort when non-empty (low/medium/high/xhigh/max)
 	WorkDir   string // overrides Config.WorkDir when non-empty
 	// PermissionMode overrides the configured permission handling for this turn:
 	// "default" | "plan" | "acceptEdits" | "bypass". Empty uses the config.
@@ -172,6 +179,13 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	}
 	if model != "" {
 		args = append(args, "--model", model)
+	}
+	effort := b.cfg.Effort
+	if req.Effort != "" {
+		effort = req.Effort
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	switch {
 	case req.PermissionMode == "bypass" || req.PermissionMode == "bypassPermissions":

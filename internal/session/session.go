@@ -21,6 +21,7 @@ type Session struct {
 	// Model, WorkDir and Mode override the gateway defaults for this conversation
 	// only, driven by /model, /dir and /mode. Empty means "use default".
 	Model   string
+	Effort  string // reasoning effort: low|medium|high|xhigh|max ("" = default)
 	WorkDir string
 	Mode    string // permission mode: default|plan|acceptEdits|bypass
 	// Turns counts completed Claude turns in this conversation.
@@ -305,6 +306,10 @@ func (s *Session) Running() bool {
 // GetModel / SetModel get/set the per-conversation model override.
 func (s *Session) GetModel() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Model }
 func (s *Session) SetModel(v string) { s.ctrl.Lock(); s.Model = v; s.ctrl.Unlock() }
+
+// GetEffort / SetEffort get/set the per-conversation reasoning-effort override.
+func (s *Session) GetEffort() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Effort }
+func (s *Session) SetEffort(v string) { s.ctrl.Lock(); s.Effort = v; s.ctrl.Unlock() }
 
 // GetWorkDir / SetWorkDir get/set the per-conversation working-directory override.
 func (s *Session) GetWorkDir() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.WorkDir }

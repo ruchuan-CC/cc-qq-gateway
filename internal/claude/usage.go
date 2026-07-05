@@ -17,38 +17,38 @@ const (
 	oauthBeta  = "oauth-2025-04-20"
 )
 
-// Window is one rate-limit window (5-hour, 7-day, per-model).
-type Window struct {
-	Has         bool
-	Utilization float64   // percent 0..100
-	ResetsAt    time.Time // zero if unknown
+// Limit is one rate-limit window reported by the usage API. The API's `limits`
+// array is the canonical, complete list of every quota on the account (the
+// rolling session window, the weekly-all window, and any per-model weekly
+// windows such as Opus or Fable), so rendering it shows *all* quotas.
+type Limit struct {
+	Kind     string    // "session" | "weekly_all" | "weekly_scoped" | ...
+	Group    string    // "session" | "weekly"
+	Scope    string    // model display name for scoped limits, else ""
+	Percent  float64   // 0..100
+	Severity string    // "normal" | "warning" | "critical" | ...
+	ResetsAt time.Time // zero if unknown
+	IsActive bool
 }
 
 // Usage is a snapshot of the subscription's usage/limits.
 type Usage struct {
-	Plan     string // e.g. "default_claude_max_20x"
-	FiveHour Window
-	SevenDay Window
-	Opus     Window
-	Sonnet   Window
+	Plan   string  // e.g. "default_claude_max_20x"
+	Limits []Limit // every quota window the API reports
+
+	// Extra usage (pay-as-you-go credits beyond the plan), shown when enabled.
+	ExtraEnabled bool
+	ExtraPercent float64 // 0..100; 0 if unknown
 }
 
-type apiWindow struct {
-	Utilization float64 `json:"utilization"`
-	ResetsAt    string  `json:"resets_at"`
-}
-
-func (w *apiWindow) to() Window {
-	if w == nil {
-		return Window{}
+func parseTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
 	}
-	out := Window{Has: true, Utilization: w.Utilization}
-	if w.ResetsAt != "" {
-		if t, err := time.Parse(time.RFC3339, w.ResetsAt); err == nil {
-			out.ResetsAt = t
-		}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
 	}
-	return out
+	return time.Time{}
 }
 
 // credPath returns the Claude OAuth credentials file path.
@@ -81,21 +81,64 @@ func FetchUsage(ctx context.Context) (*Usage, error) {
 		return nil, fmt.Errorf("no OAuth token (API-key install has no subscription usage)")
 	}
 
+	type apiWindow struct {
+		Utilization float64 `json:"utilization"`
+		ResetsAt    string  `json:"resets_at"`
+	}
 	var raw struct {
-		FiveHour       *apiWindow `json:"five_hour"`
-		SevenDay       *apiWindow `json:"seven_day"`
-		SevenDayOpus   *apiWindow `json:"seven_day_opus"`
-		SevenDaySonnet *apiWindow `json:"seven_day_sonnet"`
+		FiveHour *apiWindow `json:"five_hour"`
+		SevenDay *apiWindow `json:"seven_day"`
+		Limits   []struct {
+			Kind     string  `json:"kind"`
+			Group    string  `json:"group"`
+			Percent  float64 `json:"percent"`
+			Severity string  `json:"severity"`
+			ResetsAt string  `json:"resets_at"`
+			IsActive bool    `json:"is_active"`
+			Scope    *struct {
+				Model *struct {
+					DisplayName string `json:"display_name"`
+				} `json:"model"`
+			} `json:"scope"`
+		} `json:"limits"`
+		ExtraUsage struct {
+			IsEnabled   bool     `json:"is_enabled"`
+			Utilization *float64 `json:"utilization"`
+		} `json:"extra_usage"`
 	}
 	if err := getJSON(ctx, usageURL, tok, &raw); err != nil {
 		return nil, err
 	}
 
-	u := &Usage{
-		FiveHour: raw.FiveHour.to(),
-		SevenDay: raw.SevenDay.to(),
-		Opus:     raw.SevenDayOpus.to(),
-		Sonnet:   raw.SevenDaySonnet.to(),
+	u := &Usage{}
+	// Prefer the rich `limits` array (complete + includes per-model scoped windows).
+	for _, l := range raw.Limits {
+		lim := Limit{
+			Kind:     l.Kind,
+			Group:    l.Group,
+			Percent:  l.Percent,
+			Severity: l.Severity,
+			ResetsAt: parseTime(l.ResetsAt),
+			IsActive: l.IsActive,
+		}
+		if l.Scope != nil && l.Scope.Model != nil {
+			lim.Scope = l.Scope.Model.DisplayName
+		}
+		u.Limits = append(u.Limits, lim)
+	}
+	// Fallback for older API shapes without `limits`: synthesize from the two
+	// top-level windows so /usage still shows something.
+	if len(u.Limits) == 0 {
+		if raw.FiveHour != nil {
+			u.Limits = append(u.Limits, Limit{Kind: "session", Group: "session", Percent: raw.FiveHour.Utilization, ResetsAt: parseTime(raw.FiveHour.ResetsAt), IsActive: true})
+		}
+		if raw.SevenDay != nil {
+			u.Limits = append(u.Limits, Limit{Kind: "weekly_all", Group: "weekly", Percent: raw.SevenDay.Utilization, ResetsAt: parseTime(raw.SevenDay.ResetsAt)})
+		}
+	}
+	u.ExtraEnabled = raw.ExtraUsage.IsEnabled
+	if raw.ExtraUsage.Utilization != nil {
+		u.ExtraPercent = *raw.ExtraUsage.Utilization
 	}
 
 	// Profile is best-effort (plan / rate-limit tier).

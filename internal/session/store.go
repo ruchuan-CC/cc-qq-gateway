@@ -18,6 +18,7 @@ type persistedSession struct {
 	Key        string    `json:"key"`
 	SessionID  string    `json:"session_id,omitempty"`
 	Model      string    `json:"model,omitempty"`
+	Effort     string    `json:"effort,omitempty"`
 	WorkDir    string    `json:"work_dir,omitempty"`
 	Mode       string    `json:"mode,omitempty"`
 	TimeoutMin int       `json:"timeout_min,omitempty"`
@@ -44,6 +45,7 @@ func (s *Session) exportState() persistedSession {
 		Key:        s.Key,
 		SessionID:  s.ClaudeSessionID,
 		Model:      s.Model,
+		Effort:     s.Effort,
 		WorkDir:    s.WorkDir,
 		Mode:       s.Mode,
 		TimeoutMin: s.TimeoutMin,
@@ -61,6 +63,7 @@ func (s *Session) importState(p persistedSession) {
 	s.ctrl.Lock()
 	s.ClaudeSessionID = p.SessionID
 	s.Model = p.Model
+	s.Effort = p.Effort
 	s.WorkDir = p.WorkDir
 	s.Mode = p.Mode
 	s.TimeoutMin = p.TimeoutMin
