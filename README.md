@@ -2,15 +2,17 @@
 
 A local QQ C2C/private-chat bridge for the Codex CLI.
 
-The runtime is intentionally thin:
+The runtime is intentionally thin, with only five QQ-side control commands:
 
 ```text
 QQ private text/files -> QQ WebSocket -> cc-qq-gateway -> codex exec/resume --json
 QQ private text       <- QQ OpenAPI  <- cc-qq-gateway <- Codex final agent message
 ```
 
-There is no gateway command layer. If QQ sends `/status`, `/help`, `/model`, or
-any other slash-prefixed text, Codex receives that same text as the prompt.
+普通 QQ 消息会直接进入 Codex；只有 `/help`、`/model`、`/permissions`、
+`/plan`、`/goal` 这 5 个英文指令由网关处理。其它 `/xxx` 文本仍会原样发给
+Codex。要把这 5 个指令当普通 prompt 发送，可以用双斜杠转义，例如
+`//model gpt-5.5`。
 
 ## What It Does
 
@@ -18,22 +20,26 @@ any other slash-prefixed text, Codex receives that same text as the prompt.
 - For each QQ private user, keeps one resumable Codex thread id.
 - Sends QQ text directly to `codex exec --json` or
   `codex exec resume --json <thread_id>`.
+- Supports five QQ-side commands for help, model, permissions, one-shot plan
+  mode and per-user goal context.
 - Downloads inbound QQ attachments and appends their local paths to the Codex
   prompt. If the QQ message contains only attachments, they are saved and held
   for the same user's next text message.
-- Sends Codex's final text reply back to the same QQ private chat.
+- Sends Codex's final text reply back to the same QQ private chat, optionally
+  using QQ native markdown with a plain-text fallback.
 - Splits long QQ replies into safe text chunks; if delivery fails, it tries one
   active push and then queues the remaining text for the user's next message.
 - Persists thread ids, QQ `msg_seq`, turn counts and queued text in `state_path`.
 
 ## What It Does Not Do
 
-- No gateway slash commands.
+- No broad gateway command system beyond `/help`, `/model`, `/permissions`,
+  `/plan` and `/goal`.
 - No welcome/typing/thinking/progress notices.
 - No webhook server.
 - No local notify endpoint.
 - No outbound `@@QQ_FILE` / `@@QQ_IMAGE` protocol.
-- No per-chat model, directory, permission or timeout overrides.
+- No QQ-side directory, timeout, MCP, review or arbitrary config commands.
 
 ## Quick Start
 
@@ -71,6 +77,7 @@ See [config.example.toml](config.example.toml). The key settings are:
 | `codex.append_system_prompt` | Optional prompt prefix before the QQ text. Empty means no prefix. |
 | `codex.timeout_seconds` | Max runtime for one Codex turn. |
 | `gateway.allowed_users` | Optional QQ C2C open_id allowlist. Empty allows any private user. |
+| `gateway.admin_users` | QQ open_id list allowed to use `/permissions full-access`. Empty follows `allowed_users` for single-user setups. |
 | `gateway.max_reply_chars` | Max runes per QQ text chunk. |
 | `gateway.reply_as_markdown` | Try QQ native markdown first, then fall back to text on rejection. |
 | `gateway.state_path` | Persisted thread/queue state path; `none` disables persistence. |
@@ -81,6 +88,30 @@ For full local authority, configure Codex the same way you would when using the
 CLI directly, for example `permission_mode = "bypassPermissions"`,
 `dangerously_skip_permissions = true`, and `add_dirs = ["/"]`. Lock
 `gateway.allowed_users` down when using full authority.
+
+## QQ Usage
+
+在 QQ 私聊里直接发送普通文字即可和 Codex 对话。图片、文件、视频会先下载到
+本地，然后把本地路径追加到这次 prompt 后面。只发附件不发文字时，网关会先保
+存附件并提示你补一句说明；同一 QQ 用户的下一条文字会带上这些附件路径一起发
+给 Codex。
+
+支持的指令只有 5 个：
+
+- **/help** 显示中文使用说明。
+- **/model <model|default>** 切换模型，例如 `/model gpt-5.5`；`default`
+  恢复 `config.toml` 默认模型。
+- **/permissions <read-only|workspace-write|full-access|default>** 切换权限。
+  `full-access` 映射到 Codex 的
+  `--dangerously-bypass-approvals-and-sandbox`，只有管理员可用。
+- **/plan <需求>** 单次只读规划，不改变后续普通聊天的权限。
+- **/goal <目标|show|clear>** 设置、查看或清除当前 QQ 用户的会话目标。设置
+  后，后续普通消息会自动带上这个目标上下文交给 Codex。
+
+未知 `/xxx` 会作为普通 prompt 发给 Codex。核心指令需要转义时，在前面多加一
+个 `/`，例如 `//model gpt-5.5`。
+
+所有提示文案使用中文；指令名和权限值保持英文，方便和 Codex CLI 的概念对齐。
 
 ## Codex Invocation
 

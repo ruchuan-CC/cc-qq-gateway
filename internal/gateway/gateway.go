@@ -36,6 +36,7 @@ type Gateway struct {
 	logger   *log.Logger
 
 	allowedUsers map[string]bool
+	adminUsers   map[string]bool
 }
 
 // New builds a Gateway.
@@ -50,6 +51,7 @@ func New(client qqSender, bridge codexRunner, sessions *session.Manager, cfg con
 		cfg:          cfg,
 		logger:       logger,
 		allowedUsers: toSet(cfg.AllowedUsers),
+		adminUsers:   toSet(cfg.AdminUsers),
 	}
 }
 
@@ -114,6 +116,10 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, msgID, text string
 	g.logger.Printf("[gateway] inbound %s len=%d attachments=%d", key, len([]rune(text)), len(atts))
 
 	g.flushPending(ctx, r, key)
+	if cmd, ok := parseCommand(text); ok {
+		g.handleCommand(ctx, r, key, msgID, cmd, atts)
+		return
+	}
 	if strings.TrimSpace(text) == "" {
 		g.safeGo("attachments "+key, func() {
 			refs := g.materializeAttachments(context.Background(), key, msgID, atts)
@@ -122,9 +128,111 @@ func (g *Gateway) dispatch(ctx context.Context, r *responder, msgID, text string
 		})
 		return
 	}
+	text = unescapeCommandText(text)
 	g.safeGo("turn "+key, func() {
-		g.runTurn(context.Background(), r, key, msgID, text, atts)
+		g.runTurn(context.Background(), r, key, msgID, text, atts, turnOptions{})
 	})
+}
+
+type turnOptions struct {
+	PlanOnly bool
+}
+
+func (g *Gateway) handleCommand(ctx context.Context, r *responder, key, msgID string, cmd command, atts []qq.MessageAttachment) {
+	switch cmd.kind {
+	case commandHelp:
+		_ = r.Send(ctx, helpText())
+	case commandModel:
+		g.handleModelCommand(ctx, r, key, cmd.arg)
+	case commandPermissions:
+		g.handlePermissionsCommand(ctx, r, key, cmd.arg)
+	case commandPlan:
+		if strings.TrimSpace(cmd.arg) == "" {
+			_ = r.Send(ctx, "请在 /plan 后面写清楚要规划的需求，例如：/plan 分析这个项目的结构。")
+			return
+		}
+		g.safeGo("plan "+key, func() {
+			g.runTurn(context.Background(), r, key, msgID, cmd.arg, atts, turnOptions{PlanOnly: true})
+		})
+	case commandGoal:
+		g.handleGoalCommand(ctx, r, key, cmd.arg)
+	}
+}
+
+func (g *Gateway) handleModelCommand(ctx context.Context, r *responder, key, arg string) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		_ = r.Send(ctx, "用法：/model <model|default>，例如：/model gpt-5.5")
+		return
+	}
+	sess := g.sessions.Get(key)
+	if strings.EqualFold(arg, "default") {
+		sess.SetModel("")
+		g.persist()
+		_ = r.Send(ctx, "模型已恢复为配置文件默认值。")
+		return
+	}
+	sess.SetModel(arg)
+	g.persist()
+	_ = r.Send(ctx, "模型已切换为 "+arg+"。")
+}
+
+func (g *Gateway) handlePermissionsCommand(ctx context.Context, r *responder, key, arg string) {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	if arg == "" {
+		_ = r.Send(ctx, "用法：/permissions <read-only|workspace-write|full-access|default>")
+		return
+	}
+	sess := g.sessions.Get(key)
+	if arg == "default" {
+		sess.SetPermissions("")
+		g.persist()
+		_ = r.Send(ctx, "权限已恢复为配置文件默认值。")
+		return
+	}
+	if !validPermissions(arg) {
+		_ = r.Send(ctx, "权限值无效。可用值：read-only、workspace-write、full-access、default。")
+		return
+	}
+	if arg == "full-access" && !g.isAdmin(r.userOpenID) {
+		_ = r.Send(ctx, "只有管理员可以启用 full-access。")
+		return
+	}
+	sess.SetPermissions(arg)
+	g.persist()
+	_ = r.Send(ctx, "权限已切换为 "+arg+"。")
+}
+
+func (g *Gateway) handleGoalCommand(ctx context.Context, r *responder, key, arg string) {
+	arg = strings.TrimSpace(arg)
+	sess := g.sessions.Get(key)
+	switch {
+	case arg == "", strings.EqualFold(arg, "show"):
+		goal := strings.TrimSpace(sess.ControlState().Goal)
+		if goal == "" {
+			_ = r.Send(ctx, "当前没有设置会话目标。")
+		} else {
+			_ = r.Send(ctx, "当前会话目标：\n"+goal)
+		}
+	case strings.EqualFold(arg, "clear"):
+		sess.ClearGoal()
+		g.persist()
+		_ = r.Send(ctx, "会话目标已清除。")
+	default:
+		sess.SetGoal(arg)
+		g.persist()
+		_ = r.Send(ctx, "目标已设置：\n"+arg)
+	}
+}
+
+func (g *Gateway) isAdmin(openID string) bool {
+	if g.adminUsers != nil {
+		return g.adminUsers[openID]
+	}
+	if g.allowedUsers != nil {
+		return g.allowedUsers[openID]
+	}
+	return true
 }
 
 func (g *Gateway) safeGo(label string, fn func()) {
@@ -148,7 +256,7 @@ func (g *Gateway) flushPending(ctx context.Context, r *responder, key string) {
 	}
 }
 
-func (g *Gateway) runTurn(ctx context.Context, r *responder, key, msgID, text string, atts []qq.MessageAttachment) {
+func (g *Gateway) runTurn(ctx context.Context, r *responder, key, msgID, text string, atts []qq.MessageAttachment, opts turnOptions) {
 	sess := g.sessions.Get(key)
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -166,10 +274,15 @@ func (g *Gateway) runTurn(ctx context.Context, r *responder, key, msgID, text st
 	refs := sess.TakePendingAttachments()
 	refs = append(refs, g.materializeAttachments(ctx, key, msgID, atts)...)
 	prompt := composePrompt(text, refs)
+	ctrl := sess.ControlState()
 	g.logger.Printf("[gateway] [%s] running codex turn resume=%t", key, resuming != "")
 	res, err := g.bridge.Run(ctx, codex.Request{
-		SessionID: resuming,
-		Prompt:    prompt,
+		SessionID:   resuming,
+		Prompt:      prompt,
+		Model:       ctrl.Model,
+		Permissions: ctrl.Permissions,
+		Goal:        ctrl.Goal,
+		PlanOnly:    opts.PlanOnly,
 		OnActivity: func(tool string) {
 			g.logger.Printf("[gateway] [%s] tool: %s", key, tool)
 		},

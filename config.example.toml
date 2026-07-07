@@ -1,61 +1,64 @@
-# cc-qq-gateway configuration
-# Copy to config.toml and fill in your own values. Do not commit config.toml.
+# cc-qq-gateway 配置示例
+# 复制为 config.toml 后填入自己的密钥。不要提交 config.toml。
 
 [qq]
 app_id = "YOUR_APP_ID"
 client_secret = "YOUR_APP_SECRET"
 sandbox = false
 
-# Single-chat/private QQ messages use GROUP_AND_C2C_EVENT.
-# Leave empty to use the same default.
+# QQ 私聊/C2C 消息使用 GROUP_AND_C2C_EVENT。留空也会使用这个默认值。
 intents = ["GROUP_AND_C2C_EVENT"]
 
 [codex]
 binary = "codex"
 
-# Codex working directory. Empty uses the gateway process working directory.
+# Codex 工作目录。留空表示使用网关进程启动时所在目录。
 work_dir = ""
 
-# Optional Codex CLI defaults. Empty uses Codex's own config/default.
+# Codex CLI 默认模型和推理强度。留空表示使用 Codex 自己的默认配置。
 model = ""
 effort = ""
 
-# Non-interactive permission handling.
-# One of: default | plan | acceptEdits | bypassPermissions
+# 非交互权限默认值。
+# 可选：default | plan | acceptEdits | bypassPermissions
 permission_mode = "bypassPermissions"
 sandbox = "read-only"
 approval_policy = "never"
 dangerously_skip_permissions = true
 
-# Native Codex web search.
+# 启用 Codex 原生 web_search。
 web_search = true
 
-# Extra Codex CLI access/flags.
+# 额外 Codex CLI 可访问目录和参数。
 add_dirs = ["/"]
 extra_args = []
 
-# Optional prompt prefix. Leave empty for strict QQ text -> Codex prompt behavior.
+# 可选 prompt 前缀。留空表示 QQ 文本严格原样进入 Codex。
 append_system_prompt = ""
 
-# Max runtime for one Codex turn.
+# 单次 Codex turn 最长运行时间。
 timeout_seconds = 7200
 
 [gateway]
-# Split long replies into chunks of at most this many runes.
+# 单条 QQ 回复最多多少个字符，超长回复会拆分。
 max_reply_chars = 1800
 
-# Try QQ native markdown first. The gateway falls back to plain text if QQ rejects it.
+# 优先使用 QQ 官方 Markdown；如果 QQ 拒绝，会自动 fallback 到纯文本。
 reply_as_markdown = false
 
-# Optional C2C open_id allowlist. Empty allows any private user.
+# 可选 QQ C2C open_id 白名单。留空表示允许任何私聊用户。
 allowed_users = []
 
-# Persist thread ids, msg_seq and queued replies. Use "none" to disable.
+# 可选管理员 open_id 列表。/permissions full-access 只允许管理员使用。
+# 留空时，为兼容单用户本地网关，会按 allowed_users 判断；allowed_users 也为空则不额外限制。
+admin_users = []
+
+# 持久化 Codex thread、msg_seq、排队回复、模型/权限/目标。设置为 "none" 可禁用。
 state_path = ""
 
-# Local storage for inbound QQ images/files/videos before their paths are sent to Codex.
-# Empty defaults to ~/.cc-qq/attachments.
+# QQ 入站图片/文件/视频下载后的本地目录；路径会追加给 Codex。
+# 留空默认 ~/.cc-qq/attachments。
 attachment_dir = ""
 
-# Max bytes per inbound attachment. Default is 512 MiB.
+# 单个附件最大下载字节数。默认 512 MiB。
 attachment_max_bytes = 536870912

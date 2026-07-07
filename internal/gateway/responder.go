@@ -122,6 +122,9 @@ func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) 
 		// Passive reply: bind to the inbound msg_id. Active pushes omit it.
 		req.MsgID = r.msgID
 	}
+	if asMarkdown {
+		text = qqMarkdown(text)
+	}
 	applyContent(req, text, asMarkdown)
 	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
 	return err

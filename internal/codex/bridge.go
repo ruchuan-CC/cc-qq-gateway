@@ -95,6 +95,15 @@ type Result struct {
 type Request struct {
 	SessionID string
 	Prompt    string
+	// Model overrides Config.Model for this single turn.
+	Model string
+	// Permissions is the QQ command vocabulary:
+	// read-only | workspace-write | full-access. Empty = Config defaults.
+	Permissions string
+	// Goal is a QQ-side session goal prepended to this turn's prompt.
+	Goal string
+	// PlanOnly forces a read-only planning turn without changing stored permissions.
+	PlanOnly bool
 	// OnActivity is called with a short label each time the Codex JSON stream
 	// reports visible tool progress.
 	OnActivity func(label string)
@@ -134,7 +143,7 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 
 	workDir := b.cfg.WorkDir
 
-	args := b.execArgs(req.SessionID)
+	args := b.execArgs(req)
 	cmd := exec.CommandContext(ctx, b.cfg.Binary, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
@@ -147,7 +156,7 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 		return nil
 	}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Stdin = strings.NewReader(b.prompt(req.Prompt))
+	cmd.Stdin = strings.NewReader(b.prompt(req))
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -195,12 +204,12 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	return remnant, fmt.Errorf("codex produced no result (stderr: %s)", truncate(stderr.String(), 300))
 }
 
-func (b *Bridge) execArgs(sessionID string) []string {
+func (b *Bridge) execArgs(req Request) []string {
 	args := []string{}
 	if b.cfg.WebSearch {
 		args = append(args, "--search")
 	}
-	bypass, sandbox, approval := b.permissionArgs()
+	bypass, sandbox, approval := b.permissionArgs(req)
 	if bypass {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else {
@@ -217,20 +226,35 @@ func (b *Bridge) execArgs(sessionID string) []string {
 	for _, d := range b.cfg.AddDirs {
 		args = append(args, "--add-dir", d)
 	}
-	if b.cfg.Model != "" {
-		args = append(args, "--model", b.cfg.Model)
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = b.cfg.Model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if b.cfg.Effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", b.cfg.Effort))
 	}
 	args = append(args, b.cfg.ExtraArgs...)
-	if sessionID != "" {
-		return append(args, "exec", "resume", "--json", "--skip-git-repo-check", sessionID, "-")
+	if req.SessionID != "" {
+		return append(args, "exec", "resume", "--json", "--skip-git-repo-check", req.SessionID, "-")
 	}
 	return append(args, "exec", "--json", "--skip-git-repo-check", "-")
 }
 
-func (b *Bridge) permissionArgs() (bypass bool, sandbox, approval string) {
+func (b *Bridge) permissionArgs(req Request) (bypass bool, sandbox, approval string) {
+	if req.PlanOnly {
+		return false, "read-only", "never"
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Permissions)) {
+	case "read-only":
+		return false, "read-only", "never"
+	case "workspace-write":
+		return false, "workspace-write", "never"
+	case "full-access":
+		return true, "", ""
+	}
 	switch strings.ToLower(b.cfg.PermissionMode) {
 	case "bypass", "bypasspermissions":
 		return true, "", ""
@@ -254,11 +278,19 @@ func isBypassMode(mode string) bool {
 	}
 }
 
-func (b *Bridge) prompt(userPrompt string) string {
-	if strings.TrimSpace(b.cfg.AppendSystemPrompt) == "" {
-		return userPrompt
+func (b *Bridge) prompt(req Request) string {
+	parts := make([]string, 0, 4)
+	if strings.TrimSpace(b.cfg.AppendSystemPrompt) != "" {
+		parts = append(parts, strings.TrimSpace(b.cfg.AppendSystemPrompt))
 	}
-	return strings.TrimSpace(b.cfg.AppendSystemPrompt) + "\n\n---\n\n" + userPrompt
+	if strings.TrimSpace(req.Goal) != "" {
+		parts = append(parts, "当前 QQ 会话目标：\n"+strings.TrimSpace(req.Goal))
+	}
+	if req.PlanOnly {
+		parts = append(parts, "请只制定方案，不要修改文件或执行会改变项目状态的操作。")
+	}
+	parts = append(parts, req.Prompt)
+	return strings.Join(parts, "\n\n---\n\n")
 }
 
 // consumeStream reads Codex JSONL events to completion. It returns a completed

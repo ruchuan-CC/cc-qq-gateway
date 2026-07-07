@@ -67,6 +67,294 @@ func TestC2CTextIsPassedToCodexWithoutGatewayCommandHandling(t *testing.T) {
 	}
 }
 
+func TestHelpCommandRepliesWithoutCallingCodex(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 1)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-help", "user-1", "/help", nil))
+
+	select {
+	case req := <-runner.seen:
+		t.Fatalf("Codex runner called for /help: %+v", req)
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "QQ-Codex 使用说明") {
+			t.Fatalf("help reply = %q, want Chinese usage text", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ help reply was not sent")
+	}
+}
+
+func TestModelCommandPersistsOverrideForNextTurn(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 2)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-model", "user-1", "/model gpt-5.5", nil))
+
+	select {
+	case req := <-runner.seen:
+		t.Fatalf("Codex runner called for /model: %+v", req)
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "模型已切换") || !strings.Contains(msg.Content, "gpt-5.5") {
+			t.Fatalf("model reply = %q, want switch confirmation", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ model reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "user-1", "继续", nil))
+
+	select {
+	case req := <-runner.seen:
+		if req.Model != "gpt-5.5" {
+			t.Fatalf("request model = %q, want gpt-5.5", req.Model)
+		}
+		if req.Prompt != "继续" {
+			t.Fatalf("prompt = %q, want ordinary text", req.Prompt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestModelDefaultClearsOverride(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 3)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-model", "user-1", "/model gpt-5.5", nil))
+	select {
+	case <-sender.seen:
+	case <-time.After(time.Second):
+		t.Fatal("QQ model reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-default", "user-1", "/model default", nil))
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "模型已恢复") {
+			t.Fatalf("model default reply = %q, want restore confirmation", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ model default reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "user-1", "继续", nil))
+	select {
+	case req := <-runner.seen:
+		if req.Model != "" {
+			t.Fatalf("request model = %q, want config default", req.Model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestPermissionsCommandMapsAndRestrictsFullAccess(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 3)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{
+		MaxReplyChars: 1800,
+		AdminUsers:    []string{"admin-user"},
+	}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-deny", "user-1", "/permissions full-access", nil))
+
+	select {
+	case req := <-runner.seen:
+		t.Fatalf("Codex runner called for denied /permissions: %+v", req)
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "只有管理员") {
+			t.Fatalf("deny reply = %q, want admin warning", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ deny reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-perm", "admin-user", "/permissions workspace-write", nil))
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "权限已切换") || !strings.Contains(msg.Content, "workspace-write") {
+			t.Fatalf("permissions reply = %q, want switch confirmation", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ permissions reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "admin-user", "改一下 README", nil))
+	select {
+	case req := <-runner.seen:
+		if req.Permissions != "workspace-write" {
+			t.Fatalf("request permissions = %q, want workspace-write", req.Permissions)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestPlanCommandUsesOneShotReadOnlyMode(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "plan reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 2),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 3)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-perm", "user-1", "/permissions workspace-write", nil))
+	select {
+	case <-sender.seen:
+	case <-time.After(time.Second):
+		t.Fatal("QQ permissions reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-plan", "user-1", "/plan 分析项目结构", nil))
+	select {
+	case req := <-runner.seen:
+		if !req.PlanOnly {
+			t.Fatalf("/plan request PlanOnly = false, want true")
+		}
+		if req.Permissions != "workspace-write" {
+			t.Fatalf("/plan should not mutate stored permissions before request, got %q", req.Permissions)
+		}
+		if req.Prompt != "分析项目结构" {
+			t.Fatalf("/plan prompt = %q, want stripped requirement", req.Prompt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for /plan")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "user-1", "现在执行", nil))
+	select {
+	case req := <-runner.seen:
+		if req.PlanOnly {
+			t.Fatalf("ordinary next turn PlanOnly = true, want false")
+		}
+		if req.Permissions != "workspace-write" {
+			t.Fatalf("stored permissions after /plan = %q, want workspace-write", req.Permissions)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestGoalCommandAddsContextToFollowingTurns(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 2)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-goal", "user-1", "/goal 做一个长期在线的 QQ-Codex 网关", nil))
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "目标已设置") {
+			t.Fatalf("goal reply = %q, want set confirmation", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ goal reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "user-1", "下一步", nil))
+	select {
+	case req := <-runner.seen:
+		if req.Goal != "做一个长期在线的 QQ-Codex 网关" {
+			t.Fatalf("request goal = %q, want saved goal", req.Goal)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestGoalShowAndClear(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 4)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-goal", "user-1", "/goal 长期在线", nil))
+	select {
+	case <-sender.seen:
+	case <-time.After(time.Second):
+		t.Fatal("QQ goal set reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-show", "user-1", "/goal show", nil))
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "长期在线") {
+			t.Fatalf("goal show reply = %q, want saved goal", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ goal show reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-clear", "user-1", "/goal clear", nil))
+	select {
+	case msg := <-sender.seen:
+		if !strings.Contains(msg.Content, "目标已清除") {
+			t.Fatalf("goal clear reply = %q, want clear confirmation", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("QQ goal clear reply was not sent")
+	}
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-next", "user-1", "下一步", nil))
+	select {
+	case req := <-runner.seen:
+		if req.Goal != "" {
+			t.Fatalf("request goal = %q, want cleared goal", req.Goal)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called for next turn")
+	}
+}
+
+func TestEscapedCoreCommandIsSentToCodex(t *testing.T) {
+	runner := &fakeCodexRunner{
+		result: &codex.Result{Text: "codex reply", SessionID: "thread-1"},
+		seen:   make(chan codex.Request, 1),
+	}
+	sender := &fakeQQSender{seen: make(chan *qq.MessageRequest, 1)}
+	g := New(sender, runner, session.NewManager(), config.GatewayConfig{MaxReplyChars: 1800}, log.New(io.Discard, "", 0))
+
+	g.HandleEvent(context.Background(), c2cPayload(t, "msg-escape", "user-1", "//model gpt-5.5", nil))
+
+	select {
+	case req := <-runner.seen:
+		if req.Prompt != "/model gpt-5.5" {
+			t.Fatalf("escaped prompt = %q, want /model gpt-5.5", req.Prompt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Codex runner was not called")
+	}
+}
+
 func TestTextWithAttachmentPassesLocalPathToCodex(t *testing.T) {
 	fileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("image-bytes"))

@@ -47,6 +47,7 @@ type GatewayConfig struct {
 	MaxReplyChars      int      `toml:"max_reply_chars"`
 	ReplyAsMarkdown    bool     `toml:"reply_as_markdown"`
 	AllowedUsers       []string `toml:"allowed_users"`
+	AdminUsers         []string `toml:"admin_users"`
 	StatePath          string   `toml:"state_path"`
 	AttachmentDir      string   `toml:"attachment_dir"`
 	AttachmentMaxBytes int64    `toml:"attachment_max_bytes"`

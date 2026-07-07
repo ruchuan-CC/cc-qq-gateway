@@ -9,12 +9,13 @@ import (
 )
 
 type persistedSession struct {
-	Key        string    `json:"key"`
-	SessionID  string    `json:"session_id,omitempty"`
-	Turns      int       `json:"turns,omitempty"`
-	Seq        int64     `json:"seq,omitempty"`
-	LastActive time.Time `json:"last_active"`
-	Pending    []string  `json:"pending,omitempty"`
+	Key        string       `json:"key"`
+	SessionID  string       `json:"session_id,omitempty"`
+	Turns      int          `json:"turns,omitempty"`
+	Seq        int64        `json:"seq,omitempty"`
+	LastActive time.Time    `json:"last_active"`
+	Pending    []string     `json:"pending,omitempty"`
+	Control    ControlState `json:"control,omitempty"`
 }
 
 type persistedState struct {
@@ -33,6 +34,7 @@ func (s *Session) exportState() persistedSession {
 		Seq:        s.seqCounter.Load(),
 		LastActive: s.LastActive,
 		Pending:    append([]string(nil), s.pending...),
+		Control:    s.Control,
 	}
 }
 
@@ -41,6 +43,7 @@ func (s *Session) importState(p persistedSession) {
 	s.ThreadID = p.SessionID
 	s.Turns = p.Turns
 	s.pending = append([]string(nil), p.Pending...)
+	s.Control = p.Control
 	s.ctrl.Unlock()
 	s.seqCounter.Store(p.Seq)
 	s.LastActive = p.LastActive
@@ -105,7 +108,7 @@ func (m *Manager) SaveState() error {
 		return nil
 	}
 
-	st := persistedState{Version: 2, SavedAt: time.Now()}
+	st := persistedState{Version: 3, SavedAt: time.Now()}
 	for _, s := range sessions {
 		st.Sessions = append(st.Sessions, s.exportState())
 	}

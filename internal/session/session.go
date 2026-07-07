@@ -15,6 +15,7 @@ type Session struct {
 	ThreadID   string
 	LastActive time.Time
 	Turns      int
+	Control    ControlState
 
 	mu sync.Mutex
 
@@ -35,6 +36,13 @@ type AttachmentRef struct {
 	Path  string
 	URL   string
 	Error string
+}
+
+// ControlState 是每个 QQ 用户自己的 Codex 交互偏好；空值表示使用 config.toml 默认值。
+type ControlState struct {
+	Model       string `json:"model,omitempty"`
+	Permissions string `json:"permissions,omitempty"`
+	Goal        string `json:"goal,omitempty"`
 }
 
 // NextSeq returns the next monotonic msg_seq for this conversation.
@@ -78,6 +86,41 @@ func (s *Session) TakePendingAttachments() []AttachmentRef {
 	refs := s.pendingAttachments
 	s.pendingAttachments = nil
 	return refs
+}
+
+// ControlState returns a copy of this user's persisted Codex controls.
+func (s *Session) ControlState() ControlState {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.Control
+}
+
+// SetModel stores the per-user model override. Empty means config default.
+func (s *Session) SetModel(model string) {
+	s.ctrl.Lock()
+	s.Control.Model = model
+	s.ctrl.Unlock()
+}
+
+// SetPermissions stores the per-user permissions override. Empty means config default.
+func (s *Session) SetPermissions(permissions string) {
+	s.ctrl.Lock()
+	s.Control.Permissions = permissions
+	s.ctrl.Unlock()
+}
+
+// SetGoal stores the QQ session goal that is prepended to future Codex turns.
+func (s *Session) SetGoal(goal string) {
+	s.ctrl.Lock()
+	s.Control.Goal = goal
+	s.ctrl.Unlock()
+}
+
+// ClearGoal removes the QQ session goal.
+func (s *Session) ClearGoal() {
+	s.ctrl.Lock()
+	s.Control.Goal = ""
+	s.ctrl.Unlock()
 }
 
 // Lock serializes Codex turns for this conversation.
