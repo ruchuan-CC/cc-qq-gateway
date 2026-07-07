@@ -9,22 +9,22 @@ func qqMarkdown(text string) string {
 	text = strings.ReplaceAll(text, "\r", "\n")
 	lines := strings.Split(text, "\n")
 
-	var out []string
+	var out []markdownLine
 	inFence := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			if !inFence {
-				out = append(out, "代码：")
+				out = append(out, markdownLine{text: "代码：", kind: markdownParagraph})
 			}
 			inFence = !inFence
 			continue
 		}
 		if inFence {
 			if trimmed == "" {
-				out = append(out, "> ")
+				out = append(out, markdownLine{text: "> ", kind: markdownQuote})
 			} else {
-				out = append(out, "> "+line)
+				out = append(out, markdownLine{text: "> " + line, kind: markdownQuote})
 			}
 			continue
 		}
@@ -32,12 +32,97 @@ func qqMarkdown(text string) string {
 			continue
 		}
 		if looksLikeMarkdownTableRow(trimmed) {
-			out = append(out, "- "+strings.Join(tableCells(trimmed), " / "))
+			out = append(out, markdownLine{text: "- " + strings.Join(tableCells(trimmed), " / "), kind: markdownList})
 			continue
 		}
-		out = append(out, line)
+		out = append(out, markdownLine{text: line, kind: lineKind(trimmed)})
 	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	return renderMarkdownLines(out)
+}
+
+type markdownLineKind int
+
+const (
+	markdownBlank markdownLineKind = iota
+	markdownParagraph
+	markdownHeading
+	markdownList
+	markdownQuote
+	markdownRule
+)
+
+type markdownLine struct {
+	text string
+	kind markdownLineKind
+}
+
+func lineKind(trimmed string) markdownLineKind {
+	switch {
+	case trimmed == "":
+		return markdownBlank
+	case strings.HasPrefix(trimmed, "#"):
+		return markdownHeading
+	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), isOrderedList(trimmed):
+		return markdownList
+	case strings.HasPrefix(trimmed, ">"):
+		return markdownQuote
+	case trimmed == "***", trimmed == "---":
+		return markdownRule
+	default:
+		return markdownParagraph
+	}
+}
+
+func renderMarkdownLines(lines []markdownLine) string {
+	var b strings.Builder
+	var prev markdownLineKind
+	wrote := false
+	for _, line := range lines {
+		if line.kind == markdownBlank {
+			if wrote && !strings.HasSuffix(b.String(), "\n\n") {
+				b.WriteString("\n\n")
+			}
+			prev = markdownBlank
+			continue
+		}
+		if wrote {
+			if needsQQBlankLine(prev, line.kind) {
+				b.WriteString("\n\n")
+			} else {
+				b.WriteByte('\n')
+			}
+		}
+		b.WriteString(line.text)
+		wrote = true
+		prev = line.kind
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func needsQQBlankLine(prev, cur markdownLineKind) bool {
+	if prev == markdownBlank {
+		return false
+	}
+	if prev == markdownList && cur == markdownList {
+		return false
+	}
+	if prev == markdownQuote && cur == markdownQuote {
+		return false
+	}
+	return true
+}
+
+func isOrderedList(line string) bool {
+	dot := strings.IndexByte(line, '.')
+	if dot <= 0 || dot+1 >= len(line) || line[dot+1] != ' ' {
+		return false
+	}
+	for _, r := range line[:dot] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func looksLikeMarkdownTableRow(line string) bool {

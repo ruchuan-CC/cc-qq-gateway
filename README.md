@@ -113,6 +113,22 @@ CLI directly, for example `permission_mode = "bypassPermissions"`,
 
 所有提示文案使用中文；指令名和权限值保持英文，方便和 Codex CLI 的概念对齐。
 
+## QQ Markdown Compatibility
+
+QQ 官方 Markdown 在单聊/C2C 里支持自定义 `markdown.content`，发送时使用
+`msg_type = 2`。当前网关按官方支持子集输出：
+
+- 保留标题、粗体、斜体、删除线、链接、有序列表、无序列表、引用和水平线。
+- 普通多行文本会用空行分隔，避免 QQ 客户端把单个换行吞掉。
+- 普通段落后紧跟列表时，会自动插入空行，保证列表能被 QQ 识别。
+- GFM 表格不是 QQ 官方支持格式，会降级成无序列表。
+- fenced code block 不是 QQ 官方支持格式，会降级成引用块。
+- Markdown 图片只适合公网 URL；本地附件仍以本地路径交给 Codex，不会作为
+  QQ 出站图片发送。
+
+如果 `gateway.reply_as_markdown = true`，网关会先发 QQ Markdown；QQ API 拒
+绝时自动重试纯文本。
+
 ## Codex Invocation
 
 New thread:

@@ -44,7 +44,7 @@ timeout_seconds = 7200
 max_reply_chars = 1800
 
 # 优先使用 QQ 官方 Markdown；如果 QQ 拒绝，会自动 fallback 到纯文本。
-reply_as_markdown = false
+reply_as_markdown = true
 
 # 可选 QQ C2C open_id 白名单。留空表示允许任何私聊用户。
 allowed_users = []

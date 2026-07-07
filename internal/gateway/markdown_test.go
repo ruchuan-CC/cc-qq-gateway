@@ -30,3 +30,23 @@ func TestQQMarkdownConvertsTablesToLists(t *testing.T) {
 		t.Fatalf("markdown did not convert table rows to lists: %q", got)
 	}
 }
+
+func TestQQMarkdownUsesBlankLinesForOrdinaryLineBreaks(t *testing.T) {
+	in := "第一行\n第二行"
+
+	got := qqMarkdown(in)
+
+	if got != "第一行\n\n第二行" {
+		t.Fatalf("markdown = %q, want QQ-visible blank line break", got)
+	}
+}
+
+func TestQQMarkdownSeparatesParagraphBeforeList(t *testing.T) {
+	in := "说明\n- 第一项\n- 第二项"
+
+	got := qqMarkdown(in)
+
+	if !strings.Contains(got, "说明\n\n- 第一项\n- 第二项") {
+		t.Fatalf("markdown did not separate paragraph before list: %q", got)
+	}
+}
