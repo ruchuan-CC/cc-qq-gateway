@@ -13,25 +13,22 @@ type User struct {
 	UnionOpenID string `json:"union_openid,omitempty"`
 }
 
-// MessageAttachment is a rich-media attachment carried by an inbound message.
-type MessageAttachment struct {
-	ContentType string `json:"content_type,omitempty"`
-	Filename    string `json:"filename,omitempty"`
-	URL         string `json:"url,omitempty"`
-	Size        int    `json:"size,omitempty"`
-	Width       int    `json:"width,omitempty"`
-	Height      int    `json:"height,omitempty"`
-	ID          string `json:"id,omitempty"`
-}
-
 // MessageMarkdown is a native markdown body (msg_type=2).
 type MessageMarkdown struct {
 	Content string `json:"content,omitempty"`
 }
 
-// MessageMedia references uploaded rich media for a C2C send (msg_type=7).
-type MessageMedia struct {
-	FileInfo string `json:"file_info,omitempty"`
+// MessageAttachment is a rich-media attachment carried by an inbound C2C
+// message. The gateway downloads inbound attachments and passes local paths to
+// Codex, but does not support outbound media.
+type MessageAttachment struct {
+	Filename    string `json:"filename,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	ID          string `json:"id,omitempty"`
 }
 
 // MessageResponse is the minimal body returned by a C2C send. QQ returns the

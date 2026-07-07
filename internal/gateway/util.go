@@ -8,16 +8,11 @@ import (
 // mentionRe matches QQ inline markup like <@!123>, <@123>, <#456>, <emoji:1>.
 var mentionRe = regexp.MustCompile(`<@!?\d+>|<#\d+>|<emoji:\d+>`)
 
-// cleanContent strips bot mention markup and trims whitespace from inbound text.
+// cleanContent strips QQ markup that is not part of the user's plain text. It
+// deliberately preserves whitespace and slash-like characters so the prompt sent
+// to Codex is the user's message, not a gateway-normalized command.
 func cleanContent(s string) string {
-	s = mentionRe.ReplaceAllString(s, "")
-	s = strings.TrimSpace(s)
-	// Chinese IMEs often emit a full-width slash; fold a leading one so "／help" is
-	// still recognized as the "/help" command rather than silently sent to Codex.
-	if strings.HasPrefix(s, "／") {
-		s = "/" + strings.TrimPrefix(s, "／")
-	}
-	return s
+	return mentionRe.ReplaceAllString(s, "")
 }
 
 // splitMessage breaks text into chunks of at most maxRunes runes, preferring to

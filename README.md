@@ -1,40 +1,46 @@
 # cc-qq-gateway
 
-A QQ private-chat gateway for running a local **Codex CLI** session from a QQ
-Bot. Send a C2C/private message to the bot, the gateway runs `codex exec`, and
-the reply is sent back to the same QQ conversation with resumable context.
+A local QQ C2C/private-chat bridge for the Codex CLI.
 
+The runtime is intentionally thin:
+
+```text
+QQ private text/files -> QQ WebSocket -> cc-qq-gateway -> codex exec/resume --json
+QQ private text       <- QQ OpenAPI  <- cc-qq-gateway <- Codex final agent message
 ```
-QQ user -> QQ platform -> WebSocket/Webhook -> cc-qq-gateway -> codex exec
-   ^                                                            |
-   +---------------- passive reply / active fallback -----------+
-```
 
-## Features
+There is no gateway command layer. If QQ sends `/status`, `/help`, `/model`, or
+any other slash-prefixed text, Codex receives that same text as the prompt.
 
-- **Single-chat QQ surface**: C2C/private messages only. Group, guild, channel,
-  DM, button and reaction surfaces are intentionally not implemented.
-- **Two transports**: WebSocket for local outbound-only operation, or Webhook
-  for public HTTPS callbacks with QQ signature validation.
-- **Codex sessions**: one resumable Codex thread per QQ conversation, persisted
-  across restarts through `state_path`.
-- **Always-online runtime**: transport supervision, panic recovery, heartbeat
-  watchdog, token refresh and systemd-friendly process behavior.
-- **Rich media I/O**: inbound QQ files are downloaded to `media_dir`; Codex can
-  return files/images by emitting `@@QQ_FILE:` / `@@QQ_IMAGE:` directive lines.
-- **Long replies**: split into QQ-safe chunks, or uploaded as a `.md` file when
-  the reply cannot fit the passive-reply budget.
-- **Local notify endpoint**: optional loopback-only `/notify` endpoint for
-  trusted local processes to push proactive QQ messages.
-- **Clean command surface**: legacy provider-specific commands were removed; `/mcp`,
-  `/doctor`, `/resume`, `/compact`, `/think` now target Codex behavior.
+## What It Does
+
+- Keeps a local QQ Bot WebSocket connection online.
+- For each QQ private user, keeps one resumable Codex thread id.
+- Sends QQ text directly to `codex exec --json` or
+  `codex exec resume --json <thread_id>`.
+- Downloads inbound QQ attachments and appends their local paths to the Codex
+  prompt. If the QQ message contains only attachments, they are saved and held
+  for the same user's next text message.
+- Sends Codex's final text reply back to the same QQ private chat.
+- Splits long QQ replies into safe text chunks; if delivery fails, it tries one
+  active push and then queues the remaining text for the user's next message.
+- Persists thread ids, QQ `msg_seq`, turn counts and queued text in `state_path`.
+
+## What It Does Not Do
+
+- No gateway slash commands.
+- No welcome/typing/thinking/progress notices.
+- No webhook server.
+- No local notify endpoint.
+- No outbound `@@QQ_FILE` / `@@QQ_IMAGE` protocol.
+- No per-chat model, directory, permission or timeout overrides.
 
 ## Quick Start
 
 Prerequisites:
 
 - Go 1.23+.
-- Codex CLI on `PATH` (`codex --version`) and authenticated for the service user.
+- Codex CLI installed and authenticated for the same user running the gateway.
 - QQ Bot AppID and AppSecret from the QQ Open Platform.
 
 ```bash
@@ -43,150 +49,86 @@ make build
 ./bin/cc-qq-gateway -config config.toml
 ```
 
-Message the bot from QQ after the transport logs a successful connection.
+Fill `config.toml` with your real QQ credentials before running. Do not commit
+`config.toml`.
 
 ## Configuration
 
-See [config.example.toml](config.example.toml) for all options. The AI section
-uses `[codex]` for the live Codex CLI settings:
+See [config.example.toml](config.example.toml). The key settings are:
 
 | Setting | Meaning |
 | --- | --- |
-| `codex.binary` | Codex executable, normally `"codex"`. |
-| `codex.work_dir` | Codex working directory. |
-| `codex.model` | Optional Codex model id. Empty uses Codex config/default. |
-| `codex.effort` | Optional reasoning effort: `minimal`, `low`, `medium`, `high`, `xhigh`. |
-| `codex.permission_mode` | Gateway mode: `default`, `plan`, `acceptEdits`, `bypassPermissions`. |
-| `codex.sandbox` / `codex.approval_policy` | Codex defaults used by `permission_mode = "default"`. |
-| `codex.dangerously_skip_permissions` | Runs Codex with `--dangerously-bypass-approvals-and-sandbox`. |
-| `codex.web_search` | Enables Codex native web search. |
-| `gateway.allowed_users` | Optional C2C open_id allowlist. Use `/whoami` to learn your open_id. |
+| `qq.app_id` / `qq.client_secret` | QQ Bot credentials. |
+| `qq.sandbox` | Use the QQ sandbox OpenAPI base. |
+| `qq.intents` | WebSocket intents. Empty defaults to `GROUP_AND_C2C_EVENT`. |
+| `codex.binary` | Codex executable, normally `codex`. |
+| `codex.work_dir` | Working directory for Codex. Empty uses the process cwd. |
+| `codex.model` / `codex.effort` | Optional Codex CLI defaults. |
+| `codex.permission_mode` | `default`, `plan`, `acceptEdits`, or `bypassPermissions`. |
+| `codex.dangerously_skip_permissions` | Adds `--dangerously-bypass-approvals-and-sandbox`. |
+| `codex.web_search` | Adds `--search`. |
+| `codex.add_dirs` / `codex.extra_args` | Extra Codex CLI flags. |
+| `codex.append_system_prompt` | Optional prompt prefix before the QQ text. Empty means no prefix. |
+| `codex.timeout_seconds` | Max runtime for one Codex turn. |
+| `gateway.allowed_users` | Optional QQ C2C open_id allowlist. Empty allows any private user. |
+| `gateway.max_reply_chars` | Max runes per QQ text chunk. |
+| `gateway.reply_as_markdown` | Try QQ native markdown first, then fall back to text on rejection. |
+| `gateway.state_path` | Persisted thread/queue state path; `none` disables persistence. |
+| `gateway.attachment_dir` | Local directory for inbound QQ attachments. |
+| `gateway.attachment_max_bytes` | Per-attachment download cap; default is 512 MiB. |
 
-For full server authority, set `work_dir = "/home/codex"`, `add_dirs = ["/"]`,
-`permission_mode = "bypassPermissions"` and
-`dangerously_skip_permissions = true`. Anyone allowed to message the bot can then
-ask Codex to operate on the host, so keep `gateway.allowed_users` locked down.
+For full local authority, configure Codex the same way you would when using the
+CLI directly, for example `permission_mode = "bypassPermissions"`,
+`dangerously_skip_permissions = true`, and `add_dirs = ["/"]`. Lock
+`gateway.allowed_users` down when using full authority.
 
-## Commands
+## Codex Invocation
 
-Anything that is not a recognized gateway command is passed to Codex as the
-prompt, including unknown slash-prefixed text.
-
-**Conversation**
-
-| Command | What it does |
-| --- | --- |
-| `/new` | Start a fresh Codex thread. |
-| `/retry` | Re-run the last user message. |
-| `/stop` | Cancel the running turn. |
-| `/compact [focus]` | Ask Codex for a handoff summary, clear the thread, and seed the next turn with that summary. |
-
-**Session**
-
-| Command | What it does |
-| --- | --- |
-| `/resume` | List recent Codex threads for the working directory. |
-| `/resume <n\|id-prefix>` | Attach this QQ conversation to a listed or matching Codex thread. |
-| `/sessions` | Show live QQ conversations tracked by the gateway. |
-| `/status` | Show current thread, model, effort, directory, permission mode and live tool activity. |
-
-**Configuration**
-
-| Command | What it does |
-| --- | --- |
-| `/model [id]` | Show or set the per-conversation Codex model. `default` clears the override. |
-| `/effort [level]` | Show or set reasoning effort. `default` clears the override. |
-| `/think` | Make the next turn use `xhigh` effort. |
-| `/dir [path]` | Show or set the working directory. `default` clears the override. |
-| `/mode [name]` | Permission mode: `default`, `plan`, `acceptEdits`, `bypass`. |
-| `/timeout [min]` | Show or set the per-turn timeout. `default` clears the override. |
-
-**Codex Management**
-
-| Command | What it does |
-| --- | --- |
-| `/mcp` | Run `codex mcp list`. |
-| `/doctor` | Run `codex doctor` and return the diagnostic output. |
-
-**Shortcuts**
-
-| Command | What it does |
-| --- | --- |
-| `/review` | Review current code changes. |
-| `/diff` | Summarize `git status` and `git diff`. |
-| `/explain <x>` | Explain the given code or topic. |
-| `/web <q>` | Search the web and answer with sources. |
-| `/init` | Create or update project `AGENTS.md`. |
-
-**Info**
-
-| Command | What it does |
-| --- | --- |
-| `/whoami` | Show your QQ C2C open_id. |
-| `/usage` | Show Codex login state, recent token usage, and subscription-window availability. |
-| `/version` | Show gateway version and uptime. |
-| `/ping` | Liveness check. |
-| `/help` | Compact command menu. Use `/help all` for details. |
-
-Removed legacy provider-specific commands: `/agents`, `/memory`, `/cost`, `/export`.
-
-## Run As A Service
-
-```ini
-[Unit]
-Description=cc-qq-gateway (Codex CLI <-> QQ Bot)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-User=codex
-Group=codex
-WorkingDirectory=/home/codex/anything/cc-qq-gateway
-Environment=HOME=/home/codex
-Environment=CODEX_HOME=/home/codex/.codex
-ExecStart=/home/codex/anything/cc-qq-gateway/bin/cc-qq-gateway -config /home/codex/anything/cc-qq-gateway/config.toml
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now cc-qq-gateway
-sudo journalctl -u cc-qq-gateway -f
-```
-
-## Codex Bridge
-
-New turns run:
+New thread:
 
 ```bash
 codex [global flags] exec --json --skip-git-repo-check -
 ```
 
-Resumed turns run:
+Existing thread:
 
 ```bash
 codex [global flags] exec resume --json --skip-git-repo-check <thread_id> -
 ```
 
-The gateway reads JSONL events from stdout, stores the `thread_id`, records tool
-activity for progress notices, and sends the final `agent_message` back to QQ.
+The QQ message text is written to stdin. When a message has attachments, the
+gateway downloads them first and appends a plain text section like:
+
+```text
+QQ 附件：
+- image/png: /Users/example/.cc-qq/attachments/c2c_user/msg/1_photo.png
+- file: download failed, url=https://example.invalid/a.pdf, error=status 500
+```
+
+The gateway reads Codex JSONL stdout, stores the latest `thread_id`, and forwards
+the final agent message text to QQ.
+
+## Run As A Service
+
+Build the binary and point your service manager at:
+
+```bash
+/absolute/path/to/bin/cc-qq-gateway -config /absolute/path/to/config.toml
+```
+
+The process supervises the QQ WebSocket internally and reconnects after network
+or gateway failures.
 
 ## Project Layout
 
-```
+```text
 cmd/cc-qq-gateway/      CLI entrypoint
-internal/
-  app/                  wiring + transport selection
-  config/               TOML config loading and validation
-  qq/                   QQ Bot OpenAPI v2 client and WS/Webhook transports
-  codex/                Codex CLI bridge
-  session/              per-conversation session manager
-  gateway/              QQ event -> Codex turn -> QQ reply orchestration
+internal/app/           app wiring and WebSocket supervision
+internal/config/        TOML config loading and validation
+internal/qq/            QQ Bot OpenAPI client and WebSocket transport
+internal/codex/         Codex CLI bridge
+internal/session/       per-user Codex thread and reply queue state
+internal/gateway/       QQ event -> Codex turn -> QQ reply orchestration
 ```
 
 ## Tests
@@ -195,11 +137,3 @@ internal/
 make test
 make vet
 ```
-
-## Notes
-
-- QQ passive replies are limited by time window and count; the gateway falls back
-  to active push and finally queues replies for the next inbound message.
-- Native markdown must be enabled for your QQ bot before `reply_as_markdown`
-  should be turned on.
-- This project is independent and not affiliated with Tencent/QQ.

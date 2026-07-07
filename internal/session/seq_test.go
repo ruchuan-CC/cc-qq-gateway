@@ -24,9 +24,9 @@ func TestNextSeqMonotonicAndSurvivesReset(t *testing.T) {
 	}
 }
 
-// NextSeq is shared by every responder for a conversation (concurrent turns,
-// active pushes, the notify endpoint), so it must hand out distinct values under
-// concurrency. Run with -race.
+// NextSeq is shared by every responder for a conversation (concurrent turns and
+// active pushes), so it must hand out distinct values under concurrency. Run
+// with -race.
 func TestNextSeqConcurrentDistinct(t *testing.T) {
 	s := &Session{Key: "c2c:x"}
 	const n = 500

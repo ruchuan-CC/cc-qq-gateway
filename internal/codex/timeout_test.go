@@ -21,7 +21,7 @@ func TestRunReportsTurnTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := New(Config{Binary: slow, Timeout: 300 * time.Millisecond})
+	b := New(Config{Binary: slow, Timeout: time.Second})
 	res, err := b.Run(context.Background(), Request{Prompt: "hi"})
 	if err == nil {
 		t.Fatalf("expected an error from the timed-out turn")

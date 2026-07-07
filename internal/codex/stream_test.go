@@ -84,3 +84,22 @@ func TestConsumeStreamResultError(t *testing.T) {
 		t.Errorf("Text = %q, want fallback to error field", res.Text)
 	}
 }
+
+func TestConsumeStreamCompletionWinsOverEarlierErrorEvent(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"s"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"在的，直接说要处理什么即可。"}}`,
+		`{"type":"error","message":"transient telemetry warning"}`,
+		`{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}`,
+	}, "\n")
+	res, _, _, _ := consumeStream(strings.NewReader(stream), nil)
+	if res == nil {
+		t.Fatal("expected a completed result")
+	}
+	if res.IsError {
+		t.Fatalf("completed turn with an agent message must not be surfaced as an error: %+v", res)
+	}
+	if res.Text != "在的，直接说要处理什么即可。" {
+		t.Errorf("Text = %q", res.Text)
+	}
+}

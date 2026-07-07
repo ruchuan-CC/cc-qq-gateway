@@ -1,109 +1,61 @@
 # cc-qq-gateway configuration
-# Copy to config.toml and fill in your values.
+# Copy to config.toml and fill in your own values. Do not commit config.toml.
 
 [qq]
-# Credentials from the QQ Open Platform console (https://q.qq.com).
-app_id        = "YOUR_APP_ID"
+app_id = "YOUR_APP_ID"
 client_secret = "YOUR_APP_SECRET"
-
-# Use the sandbox OpenAPI base instead of production.
 sandbox = false
 
-# Event transport: "websocket" (dials out, no public IP required) or
-# "webhook" (QQ pushes to your HTTPS endpoint, needs a public domain/IP).
-transport = "websocket"
-
-# Gateway intents (WebSocket only). This is a SINGLE-CHAT (C2C / private) gateway,
-# so only GROUP_AND_C2C_EVENT is needed — it's the bit that delivers private
-# messages. Leave empty to use this same default.
+# Single-chat/private QQ messages use GROUP_AND_C2C_EVENT.
+# Leave empty to use the same default.
 intents = ["GROUP_AND_C2C_EVENT"]
 
-# --- Webhook settings (only used when transport = "webhook") ---
-# QQ only allows callback ports 80, 443, 8080, 8443.
-webhook_addr = ":8443"
-webhook_path = "/qqbot"
-# Provide a cert/key to terminate TLS here, or leave blank and terminate TLS at
-# a reverse proxy (nginx/caddy) in front of the gateway.
-webhook_tls_cert = ""
-webhook_tls_key  = ""
-
 [codex]
-# Codex CLI invocation.
-# Path to the Codex CLI.
 binary = "codex"
-# The project directory Codex operates in. Leave empty for the gateway's
-# own working directory.
+
+# Codex working directory. Empty uses the gateway process working directory.
 work_dir = ""
-# Optional model override, e.g. "gpt-5.5". Empty uses the Codex config/default.
+
+# Optional Codex CLI defaults. Empty uses Codex's own config/default.
 model = ""
-# Optional reasoning effort: minimal | low | medium | high | xhigh.
 effort = ""
 
-# Permission handling for non-interactive turns. One of:
-#   default | acceptEdits | plan | bypassPermissions
-# For a "the whole server is Codex's home" setup, use bypassPermissions.
+# Non-interactive permission handling.
+# One of: default | plan | acceptEdits | bypassPermissions
 permission_mode = "bypassPermissions"
-# Codex sandbox/approval defaults used by permission_mode = "default".
 sandbox = "read-only"
 approval_policy = "never"
-# Or skip all approvals and sandboxing (fully autonomous; use with care). When
-# true, this takes precedence over permission_mode. Enable for full server authority.
 dangerously_skip_permissions = true
-# Enable Codex native web search for turns.
+
+# Native Codex web search.
 web_search = true
 
-# Extra directories Codex may access (--add-dir), and any extra CLI flags. Use
-# ["/"] to grant the entire filesystem.
-add_dirs   = ["/"]
+# Extra Codex CLI access/flags.
+add_dirs = ["/"]
 extra_args = []
 
-# Prepended to each Codex prompt — useful to tune the chat persona and authority.
-append_system_prompt = "You are Codex, reachable directly over QQ by your operator. You have full administrative authority over this server. Be concise and chat-friendly; use plain text unless code is needed."
+# Optional prompt prefix. Leave empty for strict QQ text -> Codex prompt behavior.
+append_system_prompt = ""
 
-# Per-turn timeout in seconds. Long tasks are supported (e.g. 7200 = 2h), but note
-# QQ passive replies expire after ~5 minutes, so a turn that runs much longer than
-# that may finish without being able to deliver its reply over QQ. On timeout the
-# turn is killed but its session id is kept, so the user can resume with a follow-up.
+# Max runtime for one Codex turn.
 timeout_seconds = 7200
 
 [gateway]
-# Reset a conversation after this many idle minutes (starts a fresh Codex
-# session on the next message; the reset is announced to the user). 240 = a
-# thread survives lunch or a meeting without silently losing context.
-session_idle_minutes = 240
-# Split long replies into chunks of at most this many characters (QQ limit).
+# Split long replies into chunks of at most this many runes.
 max_reply_chars = 1800
-# Where inbound attachments are downloaded and outbound files are staged.
-# Default: <home>/.cc-qq/media
-media_dir = ""
-# Where session state (resumable Codex thread ids, per-chat model/dir/mode/
-# timeout overrides, queued replies, the /compact seed) is persisted so a gateway
-# restart or upgrade is invisible to the conversation. Default:
-# <home>/.cc-qq/state.json. Set to "none" to disable persistence.
-state_path = ""
-# Deliver replies too long for the 5-message passive-reply budget as an uploaded
-# file instead of truncating them.
-send_long_replies_as_file = true
-# Send replies as markdown (msg_type=2) instead of plain text. Requires the
-# markdown capability to be enabled for your bot.
+
+# Try QQ native markdown first. The gateway falls back to plain text if QQ rejects it.
 reply_as_markdown = false
-# Optional acknowledgement sent immediately while Codex thinks. Empty disables.
-thinking_message = ""
-# Optional allowlist. If non-empty, only these C2C (single-chat) user open_ids may
-# talk to the bot. Empty serves any user. Send /whoami to learn your open_id.
+
+# Optional C2C open_id allowlist. Empty allows any private user.
 allowed_users = []
 
-# --- Proactive notify endpoint (optional) ---
-# When notify_addr is set, the gateway starts a tiny localhost-only HTTP endpoint
-# (POST /notify) that lets a TRUSTED LOCAL process — e.g. a trading bot — push a
-# proactive message to the operator over QQ, with the gateway's queue-for-next-
-# inbound fallback (a failed push is re-delivered on the operator's next message).
-# Bind to a loopback address ONLY (127.0.0.1:PORT); a non-loopback bind is refused
-# at startup so this never widens your network surface.
-notify_addr = ""           # e.g. "127.0.0.1:8787" — empty disables the endpoint
-# Shared secret the caller must present (header X-Notify-Token or ?token=). REQUIRED
-# when notify_addr is set — an empty token disables the endpoint (never expose an
-# unauthenticated push channel). Use a long random value and keep it out of git.
-notify_token = ""
-# The C2C open_id pushes are delivered to. Empty falls back to allowed_users[0].
-notify_open_id = ""
+# Persist thread ids, msg_seq and queued replies. Use "none" to disable.
+state_path = ""
+
+# Local storage for inbound QQ images/files/videos before their paths are sent to Codex.
+# Empty defaults to ~/.cc-qq/attachments.
+attachment_dir = ""
+
+# Max bytes per inbound attachment. Default is 512 MiB.
+attachment_max_bytes = 536870912

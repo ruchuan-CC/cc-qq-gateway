@@ -46,9 +46,6 @@ type Config struct {
 	// AppendSystemPrompt is prepended to each prompt because Codex exec has no
 	// append-system-prompt flag.
 	AppendSystemPrompt string
-	// ProtocolPrompt is an additional instruction block the gateway always
-	// injects (e.g. the QQ media I/O protocol). Combined with AppendSystemPrompt.
-	ProtocolPrompt string
 	// AddDirs are extra directories Codex may access/write (--add-dir).
 	AddDirs []string
 	// ExtraArgs are appended before the exec subcommand.
@@ -79,26 +76,6 @@ func New(cfg Config) *Bridge {
 	return &Bridge{cfg: cfg}
 }
 
-// DefaultWorkDir reports the bridge's configured working directory.
-func (b *Bridge) DefaultWorkDir() string { return b.cfg.WorkDir }
-
-// DefaultModel reports the bridge's configured model ("" means CLI default).
-func (b *Bridge) DefaultModel() string { return b.cfg.Model }
-
-// DefaultEffort reports the bridge's configured effort ("" means CLI default).
-func (b *Bridge) DefaultEffort() string { return b.cfg.Effort }
-
-// DefaultTimeout reports the configured per-turn timeout.
-func (b *Bridge) DefaultTimeout() time.Duration { return b.cfg.Timeout }
-
-// FullAuthority reports whether turns run with sandboxing and approvals disabled.
-func (b *Bridge) FullAuthority() bool {
-	if b.cfg.DangerouslySkipPermissions || isBypassMode(b.cfg.PermissionMode) {
-		return true
-	}
-	return b.cfg.Sandbox == "danger-full-access" && b.cfg.ApprovalPolicy == "never"
-}
-
 // Result is the outcome of a single Codex turn.
 type Result struct {
 	Text                  string
@@ -114,18 +91,10 @@ type Result struct {
 }
 
 // Request is a single Codex turn. SessionID, when set, resumes an existing
-// thread. Model and WorkDir override the bridge defaults for this turn only.
+// thread.
 type Request struct {
 	SessionID string
 	Prompt    string
-	Model     string // overrides Config.Model when non-empty
-	Effort    string // overrides Config.Effort when non-empty
-	WorkDir   string // overrides Config.WorkDir when non-empty
-	// PermissionMode overrides the configured permission handling for this turn:
-	// "default" | "plan" | "acceptEdits" | "bypass". Empty uses the config.
-	PermissionMode string
-	// Timeout, when >0, overrides Config.Timeout for this turn.
-	Timeout time.Duration
 	// OnActivity is called with a short label each time the Codex JSON stream
 	// reports visible tool progress.
 	OnActivity func(label string)
@@ -160,26 +129,12 @@ type tokenUsage struct {
 // Result.SessionID.
 func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	timeout := b.cfg.Timeout
-	if req.Timeout > 0 {
-		timeout = req.Timeout
-	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	model := b.cfg.Model
-	if req.Model != "" {
-		model = req.Model
-	}
-	effort := b.cfg.Effort
-	if req.Effort != "" {
-		effort = req.Effort
-	}
 	workDir := b.cfg.WorkDir
-	if req.WorkDir != "" {
-		workDir = req.WorkDir
-	}
 
-	args := b.execArgs(req.SessionID, model, effort, workDir, req.PermissionMode)
+	args := b.execArgs(req.SessionID)
 	cmd := exec.CommandContext(ctx, b.cfg.Binary, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
@@ -240,12 +195,12 @@ func (b *Bridge) Run(ctx context.Context, req Request) (*Result, error) {
 	return remnant, fmt.Errorf("codex produced no result (stderr: %s)", truncate(stderr.String(), 300))
 }
 
-func (b *Bridge) execArgs(sessionID, model, effort, workDir, mode string) []string {
+func (b *Bridge) execArgs(sessionID string) []string {
 	args := []string{}
 	if b.cfg.WebSearch {
 		args = append(args, "--search")
 	}
-	bypass, sandbox, approval := b.permissionArgs(mode)
+	bypass, sandbox, approval := b.permissionArgs()
 	if bypass {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else {
@@ -256,17 +211,17 @@ func (b *Bridge) execArgs(sessionID, model, effort, workDir, mode string) []stri
 			args = append(args, "--ask-for-approval", approval)
 		}
 	}
-	if workDir != "" {
-		args = append(args, "--cd", workDir)
+	if b.cfg.WorkDir != "" {
+		args = append(args, "--cd", b.cfg.WorkDir)
 	}
 	for _, d := range b.cfg.AddDirs {
 		args = append(args, "--add-dir", d)
 	}
-	if model != "" {
-		args = append(args, "--model", model)
+	if b.cfg.Model != "" {
+		args = append(args, "--model", b.cfg.Model)
 	}
-	if effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	if b.cfg.Effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", b.cfg.Effort))
 	}
 	args = append(args, b.cfg.ExtraArgs...)
 	if sessionID != "" {
@@ -275,11 +230,8 @@ func (b *Bridge) execArgs(sessionID, model, effort, workDir, mode string) []stri
 	return append(args, "exec", "--json", "--skip-git-repo-check", "-")
 }
 
-func (b *Bridge) permissionArgs(mode string) (bypass bool, sandbox, approval string) {
-	if mode == "" || mode == "default" {
-		mode = b.cfg.PermissionMode
-	}
-	switch strings.ToLower(mode) {
+func (b *Bridge) permissionArgs() (bypass bool, sandbox, approval string) {
+	switch strings.ToLower(b.cfg.PermissionMode) {
 	case "bypass", "bypasspermissions":
 		return true, "", ""
 	case "plan":
@@ -303,11 +255,10 @@ func isBypassMode(mode string) bool {
 }
 
 func (b *Bridge) prompt(userPrompt string) string {
-	sys := joinSystemPrompts(b.cfg.AppendSystemPrompt, b.cfg.ProtocolPrompt)
-	if sys == "" {
+	if strings.TrimSpace(b.cfg.AppendSystemPrompt) == "" {
 		return userPrompt
 	}
-	return sys + "\n\n---\n\n" + userPrompt
+	return strings.TrimSpace(b.cfg.AppendSystemPrompt) + "\n\n---\n\n" + userPrompt
 }
 
 // consumeStream reads Codex JSONL events to completion. It returns a completed
@@ -368,7 +319,7 @@ func consumeStream(r io.Reader, onActivity func(string)) (*Result, string, []byt
 		return &Result{
 			Text:                  text,
 			SessionID:             sessionID,
-			IsError:               failed,
+			IsError:               failed && !done,
 			NumTurns:              1,
 			InputTokens:           usage.InputTokens,
 			CachedInputTokens:     usage.CachedInputTokens,
@@ -425,39 +376,12 @@ func eventError(ev streamEvent) string {
 	return string(ev.Error)
 }
 
-// RunCLI runs a Codex management subcommand (e.g. "mcp list", "doctor") and
-// returns its combined output. Output is returned even on non-zero exit so error
-// text reaches the user.
-func (b *Bridge) RunCLI(ctx context.Context, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, b.cfg.Binary, args...)
-	if b.cfg.WorkDir != "" {
-		cmd.Dir = b.cfg.WorkDir
-	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	return strings.TrimSpace(out.String()), err
-}
-
 func parseResult(out []byte) (*Result, error) {
 	out = bytes.TrimSpace(out)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("empty output from codex")
 	}
 	return &Result{Text: string(out)}, nil
-}
-
-func joinSystemPrompts(parts ...string) string {
-	var nonEmpty []string
-	for _, p := range parts {
-		if strings.TrimSpace(p) != "" {
-			nonEmpty = append(nonEmpty, strings.TrimSpace(p))
-		}
-	}
-	return strings.Join(nonEmpty, "\n\n")
 }
 
 func truncate(s string, n int) string {

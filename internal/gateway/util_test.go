@@ -7,12 +7,12 @@ import (
 
 func TestCleanContent(t *testing.T) {
 	cases := map[string]string{
-		"<@!123456> hello there":      "hello there",
-		"  <@987> what is <#42> ?":    "what is  ?",
+		"<@!123456> hello there":      " hello there",
+		"  <@987> what is <#42> ?":    "   what is  ?",
 		"plain message":               "plain message",
-		"<emoji:4> hi <@!1> <@2> bye": "hi   bye",
-		"／help":                       "/help", // full-width slash folds to a command
-		"／model gpt-5.5":              "/model gpt-5.5",
+		"<emoji:4> hi <@!1> <@2> bye": " hi   bye",
+		"／help":                       "／help",
+		"／model gpt-5.5":              "／model gpt-5.5",
 	}
 	for in, want := range cases {
 		if got := cleanContent(in); got != want {

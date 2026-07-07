@@ -1,7 +1,3 @@
-// Session persistence: the manager can snapshot every conversation's durable
-// state to a JSON file and restore it at startup, so a gateway restart (upgrade,
-// crash, reboot) no longer loses the resumable Codex thread, per-conversation
-// settings, or queued replies — the conversation continues as if nothing happened.
 package session
 
 import (
@@ -9,95 +5,56 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
-// persistedSession is the durable subset of a Session. Runtime-only state
-// (in-flight turn, cancel func, idle-reset flag, resume listing) is not saved.
 type persistedSession struct {
 	Key        string    `json:"key"`
 	SessionID  string    `json:"session_id,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Effort     string    `json:"effort,omitempty"`
-	WorkDir    string    `json:"work_dir,omitempty"`
-	Mode       string    `json:"mode,omitempty"`
-	TimeoutMin int       `json:"timeout_min,omitempty"`
 	Turns      int       `json:"turns,omitempty"`
 	Seq        int64     `json:"seq,omitempty"`
 	LastActive time.Time `json:"last_active"`
-	LastPrompt string    `json:"last_prompt,omitempty"`
-	Seed       string    `json:"seed,omitempty"`
 	Pending    []string  `json:"pending,omitempty"`
 }
 
-// persistedState is the on-disk file shape.
 type persistedState struct {
 	Version  int                `json:"version"`
 	SavedAt  time.Time          `json:"saved_at"`
 	Sessions []persistedSession `json:"sessions"`
 }
 
-// exportState snapshots a session's durable fields.
 func (s *Session) exportState() persistedSession {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
 	return persistedSession{
 		Key:        s.Key,
 		SessionID:  s.ThreadID,
-		Model:      s.Model,
-		Effort:     s.Effort,
-		WorkDir:    s.WorkDir,
-		Mode:       s.Mode,
-		TimeoutMin: s.TimeoutMin,
 		Turns:      s.Turns,
 		Seq:        s.seqCounter.Load(),
 		LastActive: s.LastActive,
-		LastPrompt: s.lastPrompt,
-		Seed:       s.seed,
 		Pending:    append([]string(nil), s.pending...),
 	}
 }
 
-// importState restores a session's durable fields from a snapshot.
 func (s *Session) importState(p persistedSession) {
 	s.ctrl.Lock()
 	s.ThreadID = p.SessionID
-	s.Model = sanitizeModel(p.Model)
-	s.Effort = p.Effort
-	s.WorkDir = p.WorkDir
-	s.Mode = p.Mode
-	s.TimeoutMin = p.TimeoutMin
 	s.Turns = p.Turns
-	s.lastPrompt = p.LastPrompt
-	s.seed = p.Seed
 	s.pending = append([]string(nil), p.Pending...)
 	s.ctrl.Unlock()
 	s.seqCounter.Store(p.Seq)
 	s.LastActive = p.LastActive
 }
 
-func sanitizeModel(v string) string {
-	low := strings.ToLower(strings.TrimSpace(v))
-	for _, marker := range []string{"opus", "sonnet", "haiku", "fable"} {
-		if strings.Contains(low, marker) {
-			return ""
-		}
-	}
-	return v
-}
-
-// SetStatePath configures where SaveState/LoadState persist the sessions.
-// Empty disables persistence (both become no-ops).
+// SetStatePath configures where SaveState/LoadState persist sessions. Empty
+// disables persistence.
 func (m *Manager) SetStatePath(path string) {
 	m.mu.Lock()
 	m.statePath = path
 	m.mu.Unlock()
 }
 
-// LoadState restores sessions from the state file. A missing file is not an
-// error (first run). Sessions idle past the TTL are still restored — the normal
-// Get() path applies the idle reset with its user-visible notice.
+// LoadState restores sessions from disk. A missing file is not an error.
 func (m *Manager) LoadState() error {
 	m.mu.Lock()
 	path := m.statePath
@@ -135,8 +92,7 @@ func (m *Manager) LoadState() error {
 	return nil
 }
 
-// SaveState atomically writes all sessions to the state file (0600 — it holds
-// conversation remnants like the last prompt and queued replies).
+// SaveState atomically writes all sessions to the state file.
 func (m *Manager) SaveState() error {
 	m.mu.Lock()
 	path := m.statePath
@@ -149,7 +105,7 @@ func (m *Manager) SaveState() error {
 		return nil
 	}
 
-	st := persistedState{Version: 1, SavedAt: time.Now()}
+	st := persistedState{Version: 2, SavedAt: time.Now()}
 	for _, s := range sessions {
 		st.Sessions = append(st.Sessions, s.exportState())
 	}

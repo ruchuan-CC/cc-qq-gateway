@@ -3,7 +3,7 @@ config.toml
 
 # Build artifacts
 /bin/
-cc-qq-gateway
+/cc-qq-gateway
 *.exe
 
 # Go

@@ -68,6 +68,13 @@ func (m *TokenManager) Token(ctx context.Context) (string, error) {
 	return m.token, nil
 }
 
+func (m *TokenManager) Invalidate() {
+	m.mu.Lock()
+	m.token = ""
+	m.expiresAt = time.Time{}
+	m.mu.Unlock()
+}
+
 func (m *TokenManager) refreshLocked(ctx context.Context) error {
 	body, _ := json.Marshal(tokenRequest{AppID: m.appID, ClientSecret: m.clientSecret})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, bytes.NewReader(body))

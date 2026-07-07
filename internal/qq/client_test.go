@@ -1,7 +1,9 @@
 package qq
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -64,5 +66,53 @@ func TestDoJSONNoRetryOn4xx(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("4xx must not be retried; got %d attempts", got)
+	}
+}
+
+func TestDoJSONRefreshesTokenOnExpiredTokenCode(t *testing.T) {
+	var apiCalls atomic.Int64
+	c := NewClient(Options{
+		AppID:        "app",
+		ClientSecret: "secret",
+		BaseURL:      "https://api.test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Host == "bots.qq.com" && r.URL.Path == "/app/getAppAccessToken" {
+				return jsonResponse(http.StatusOK, `{"access_token":"fresh-token","expires_in":"7200"}`), nil
+			}
+			apiCalls.Add(1)
+			if got := r.Header.Get("Authorization"); got != "QQBot fresh-token" {
+				return jsonResponse(http.StatusInternalServerError, `{"code":11244,"message":"token not exist or expire"}`), nil
+			}
+			return jsonResponse(http.StatusOK, `{"id":"ok"}`), nil
+		})},
+	})
+	c.tokens.mu.Lock()
+	c.tokens.token = "stale-token"
+	c.tokens.expiresAt = time.Now().Add(time.Hour)
+	c.tokens.mu.Unlock()
+
+	resp, err := c.SendC2CMessage(context.Background(), "openid", &MessageRequest{Content: "hi", MsgSeq: 1})
+	if err != nil {
+		t.Fatalf("expected expired token refresh to succeed, got %v", err)
+	}
+	if resp.ID != "ok" {
+		t.Fatalf("response id = %q, want ok", resp.ID)
+	}
+	if got := apiCalls.Load(); got != 2 {
+		t.Fatalf("api calls = %d, want stale attempt plus refreshed retry", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(body)),
 	}
 }

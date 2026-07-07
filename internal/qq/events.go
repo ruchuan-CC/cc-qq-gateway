@@ -2,7 +2,7 @@ package qq
 
 import "encoding/json"
 
-// Event type (the "t" field of an op-0 dispatch / the webhook event type).
+// Event type (the "t" field of an op-0 dispatch).
 //
 // This gateway is single-chat (C2C / private) only. All single-chat events ride
 // the same GROUP_AND_C2C_EVENT intent (1<<25): the C2C message plus the user/
@@ -45,9 +45,8 @@ func (e *C2CManageEvent) User() string {
 	return e.Author.UserOpenID
 }
 
-// Payload is the unified gateway/webhook envelope.
+// Payload is the QQ gateway dispatch envelope.
 type Payload struct {
-	ID   string          `json:"id,omitempty"` // present on webhook pushes
 	Op   int             `json:"op"`
 	Data json.RawMessage `json:"d,omitempty"`
 	Seq  int64           `json:"s,omitempty"` // sequence (op 0 only)
@@ -56,16 +55,15 @@ type Payload struct {
 
 // WebSocket opcodes.
 const (
-	OpDispatch           = 0
-	OpHeartbeat          = 1
-	OpIdentify           = 2
-	OpResume             = 6
-	OpReconnect          = 7
-	OpInvalidSession     = 9
-	OpHello              = 10
-	OpHeartbeatACK       = 11
-	OpHTTPCallbackACK    = 12
-	OpCallbackValidation = 13
+	OpDispatch        = 0
+	OpHeartbeat       = 1
+	OpIdentify        = 2
+	OpResume          = 6
+	OpReconnect       = 7
+	OpInvalidSession  = 9
+	OpHello           = 10
+	OpHeartbeatACK    = 11
+	OpHTTPCallbackACK = 12
 )
 
 // HelloData is op 10.
@@ -94,16 +92,4 @@ type C2CMessage struct {
 	Timestamp   string              `json:"timestamp,omitempty"`
 	Author      C2CMessageAuthor    `json:"author,omitempty"`
 	Attachments []MessageAttachment `json:"attachments,omitempty"`
-}
-
-// CallbackValidation is the op-13 webhook validation payload.
-type CallbackValidation struct {
-	PlainToken string `json:"plain_token"`
-	EventTs    string `json:"event_ts"`
-}
-
-// CallbackValidationResponse is the op-13 response body.
-type CallbackValidationResponse struct {
-	PlainToken string `json:"plain_token"`
-	Signature  string `json:"signature"`
 }

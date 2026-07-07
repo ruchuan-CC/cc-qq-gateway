@@ -1,109 +1,46 @@
-// Package session tracks per-conversation Codex threads, resetting them
-// after inactivity and serializing turns within a single conversation.
+// Package session tracks per-conversation Codex threads and serializes turns
+// within a single QQ conversation.
 package session
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// Session holds the Codex thread id and bookkeeping for one conversation.
+// Session holds the durable Codex thread id and runtime bookkeeping for one
+// QQ C2C conversation.
 type Session struct {
-	// Key uniquely identifies the conversation (e.g. "c2c:<openid>").
-	Key string
-	// ThreadID is the resumable Codex thread id (empty until the first
-	// turn completes). The field name is kept for state-file compatibility.
-	ThreadID string
-	// LastActive is the time of the last interaction.
+	Key        string
+	ThreadID   string
 	LastActive time.Time
-	// Model, WorkDir and Mode override the gateway defaults for this conversation
-	// only, driven by /model, /dir and /mode. Empty means "use default".
-	Model   string
-	Effort  string // reasoning effort: minimal|low|medium|high|xhigh ("" = default)
-	WorkDir string
-	Mode    string // permission mode: default|plan|acceptEdits|bypass
-	// Turns counts completed Codex turns in this conversation.
-	Turns int
-	// TimeoutMin, when >0, overrides the configured per-turn timeout (minutes)
-	// for this conversation, driven by /timeout.
-	TimeoutMin int
+	Turns      int
 
-	// mu serializes turns within this conversation so messages are processed in
-	// order and never concurrently.
 	mu sync.Mutex
 
-	// ctrl guards the in-flight turn's cancel func and running flag, plus the
-	// last-turn bookkeeping below. It is a separate lock from mu so /stop can
-	// cancel a turn (and commands can read stats) while mu is held by a turn.
-	ctrl       sync.Mutex
-	cancel     context.CancelFunc
-	running    bool
-	startedAt  time.Time // when the in-flight turn began, for /status elapsed time
-	lastPrompt string    // last user message, for /retry
-	thinkNext  bool      // next turn uses xhigh effort, set by /think
-	idleReset  bool      // an idle-TTL reset cleared the context since last checked
-	// seed, when non-empty, is prepended to the next fresh (non-resuming) turn's
-	// prompt — the handoff summary /compact produces so a compacted conversation
-	// continues with its context. Cleared once consumed.
-	seed string
-	// Tool-activity telemetry for the in-flight turn, fed by the bridge's
-	// OnActivity callback: what the turn is doing right now, for /status and the
-	// long-turn progress notices. Reset by BeginTurn.
-	lastTool   string
-	toolCalls  int
-	lastToolAt time.Time
-	lastUsage  Usage
-	lastError  LastError
-	// resumeChoices holds the session ids last shown by /resume (no argument), so
-	// a follow-up "/resume 2" can pick by number. Ephemeral; not persisted.
-	resumeChoices []string
-	// threadGen bumps every time the resumable thread id is cleared (/new, idle
-	// reset). A turn captures it at start and only writes back its session id if the
-	// generation still matches, so a turn that finished at the same instant /new
-	// reset the conversation can't resurrect the just-cleared context.
-	threadGen uint64
+	ctrl               sync.Mutex
+	running            bool
+	pending            []string
+	pendingAttachments []AttachmentRef
 
-	// pending holds replies that could not be delivered live (e.g. a long turn
-	// finished after QQ's passive-reply window expired and active push was
-	// unavailable). They are flushed on the conversation's next inbound message,
-	// which opens a fresh passive-reply window. Guarded by ctrl.
-	pending []string
-
-	// seqCounter is a process-lifetime monotonic source for the QQ msg_seq of
-	// every reply sent to this conversation. QQ rejects a reused msg_seq with code
-	// 40054005 ("消息被去重，请检查请求msgseq"), so the counter must be shared across
-	// ALL responders for this user (consecutive turns, active pushes, the notify
-	// endpoint) — a per-responder counter that restarts at 0 each message collides.
-	// It deliberately survives /new and idle resets (only the Codex thread id is
-	// cleared) so the sequence never goes backwards while the process lives.
+	// QQ rejects reused msg_seq values, so every reply path for a user shares one
+	// process-lifetime counter.
 	seqCounter atomic.Int64
 }
 
-// Usage is the most recent completed Codex turn's token/latency snapshot.
-type Usage struct {
-	At                    time.Time
-	Duration              time.Duration
-	InputTokens           int
-	CachedInputTokens     int
-	OutputTokens          int
-	ReasoningOutputTokens int
-	TotalTokens           int
+// AttachmentRef is an inbound QQ attachment after the gateway has attempted to
+// materialize it locally.
+type AttachmentRef struct {
+	Kind  string
+	Path  string
+	URL   string
+	Error string
 }
 
-// LastError is the most recent failed Codex turn snapshot.
-type LastError struct {
-	At      time.Time
-	Message string
-}
-
-// NextSeq returns the next monotonic msg_seq for a reply to this conversation.
-// The first value is 1 (msg_seq 0 is omitted on the wire by omitempty).
+// NextSeq returns the next monotonic msg_seq for this conversation.
 func (s *Session) NextSeq() int { return int(s.seqCounter.Add(1)) }
 
-// QueuePending stores a reply that could not be delivered now, for delivery on
-// the next inbound message. Empty strings are ignored.
+// QueuePending stores a reply that could not be delivered now.
 func (s *Session) QueuePending(text string) {
 	if text == "" {
 		return
@@ -113,7 +50,7 @@ func (s *Session) QueuePending(text string) {
 	s.ctrl.Unlock()
 }
 
-// TakePending returns and clears the queued replies.
+// TakePending returns and clears queued replies.
 func (s *Session) TakePending() []string {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
@@ -122,215 +59,43 @@ func (s *Session) TakePending() []string {
 	return p
 }
 
-// RecordTurn stores bookkeeping from a completed turn for /retry.
-func (s *Session) RecordTurn(prompt string) {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	if prompt != "" {
-		s.lastPrompt = prompt
+// QueuePendingAttachments stores attachment refs that are waiting for the
+// user's next text prompt.
+func (s *Session) QueuePendingAttachments(refs []AttachmentRef) {
+	if len(refs) == 0 {
+		return
 	}
-}
-
-// RecordUsage stores the most recent completed turn's token usage for /usage.
-func (s *Session) RecordUsage(input, cached, output, reasoning, total int, duration time.Duration) {
 	s.ctrl.Lock()
-	s.lastUsage = Usage{
-		At:                    time.Now(),
-		Duration:              duration,
-		InputTokens:           input,
-		CachedInputTokens:     cached,
-		OutputTokens:          output,
-		ReasoningOutputTokens: reasoning,
-		TotalTokens:           total,
-	}
+	s.pendingAttachments = append(s.pendingAttachments, refs...)
 	s.ctrl.Unlock()
 }
 
-// LastUsage returns the most recent completed turn's token usage, if any.
-func (s *Session) LastUsage() Usage {
+// TakePendingAttachments returns and clears attachment refs waiting for the next
+// text prompt.
+func (s *Session) TakePendingAttachments() []AttachmentRef {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
-	return s.lastUsage
+	refs := s.pendingAttachments
+	s.pendingAttachments = nil
+	return refs
 }
 
-// RecordError stores the most recent failed Codex turn for /usage diagnostics.
-func (s *Session) RecordError(msg string) {
-	s.ctrl.Lock()
-	s.lastError = LastError{At: time.Now(), Message: msg}
-	s.ctrl.Unlock()
-}
-
-// LastError returns the most recent failed Codex turn, if any.
-func (s *Session) LastError() LastError {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.lastError
-}
-
-// LastPrompt returns the last user message (for /retry).
-func (s *Session) LastPrompt() string {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.lastPrompt
-}
-
-// SetThinkNext marks the next turn to use xhigh effort.
-func (s *Session) SetThinkNext() {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	s.thinkNext = true
-}
-
-// TakeThinkNext returns whether the next turn should think, clearing the flag.
-func (s *Session) TakeThinkNext() bool {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	v := s.thinkNext
-	s.thinkNext = false
-	return v
-}
-
-// markIdleReset records that the idle TTL just cleared this conversation's
-// context, so the gateway can tell the user instead of resetting silently.
-// Only the Manager's idle path sets it — an explicit /new is not flagged.
-func (s *Session) markIdleReset() {
-	s.ctrl.Lock()
-	s.idleReset = true
-	s.ctrl.Unlock()
-}
-
-// TakeIdleReset reports whether an idle reset happened since the last check,
-// clearing the flag.
-func (s *Session) TakeIdleReset() bool {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	v := s.idleReset
-	s.idleReset = false
-	return v
-}
-
-// SetSeed stores a context seed (the /compact handoff summary) injected into the
-// next fresh turn. TakeSeed consumes it; PeekSeed inspects without consuming.
-func (s *Session) SetSeed(text string) {
-	s.ctrl.Lock()
-	s.seed = text
-	s.ctrl.Unlock()
-}
-
-// TakeSeed returns and clears the pending context seed.
-func (s *Session) TakeSeed() string {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	v := s.seed
-	s.seed = ""
-	return v
-}
-
-// PeekSeed returns the pending context seed without consuming it.
-func (s *Session) PeekSeed() string {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.seed
-}
-
-// GetTimeoutMin / SetTimeoutMin get/set the per-conversation turn-timeout
-// override in minutes (0 = use the configured default).
-func (s *Session) GetTimeoutMin() int  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.TimeoutMin }
-func (s *Session) SetTimeoutMin(v int) { s.ctrl.Lock(); s.TimeoutMin = v; s.ctrl.Unlock() }
-
-// NoteTool records that the in-flight turn started a tool, for progress
-// visibility (/status and the long-turn notices).
-func (s *Session) NoteTool(name string) {
-	s.ctrl.Lock()
-	s.lastTool = name
-	s.toolCalls++
-	s.lastToolAt = time.Now()
-	s.ctrl.Unlock()
-}
-
-// ToolActivity reports the in-flight turn's latest tool, how many tool calls it
-// has made, and when the last one started. Zero values when idle/no activity.
-func (s *Session) ToolActivity() (tool string, calls int, at time.Time) {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.lastTool, s.toolCalls, s.lastToolAt
-}
-
-// SetResumeChoices stores the session ids last listed by /resume, so the user
-// can pick one by number.
-func (s *Session) SetResumeChoices(ids []string) {
-	s.ctrl.Lock()
-	s.resumeChoices = ids
-	s.ctrl.Unlock()
-}
-
-// ResumeChoice returns the stored id for a 1-based pick, or "" when out of range.
-func (s *Session) ResumeChoice(n int) string {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	if n < 1 || n > len(s.resumeChoices) {
-		return ""
-	}
-	return s.resumeChoices[n-1]
-}
-
-// AttachSession switches this conversation to an existing Codex thread id
-// (/resume). It bumps the generation so an in-flight turn from the previous
-// context can't write its session id over the one we just attached, and clears
-// any pending compact seed (the resumed session carries its own context).
-func (s *Session) AttachSession(id string) {
-	s.ctrl.Lock()
-	s.threadGen++
-	s.ThreadID = id
-	s.seed = ""
-	s.ctrl.Unlock()
-}
-
-// Lock serializes a turn for this conversation.
+// Lock serializes Codex turns for this conversation.
 func (s *Session) Lock()   { s.mu.Lock() }
 func (s *Session) Unlock() { s.mu.Unlock() }
 
-// BeginTurn records the cancel func for the in-flight turn and marks it running.
-// The tool-activity telemetry restarts with the turn.
-func (s *Session) BeginTurn(cancel context.CancelFunc) {
+// BeginTurn marks a Codex turn as running.
+func (s *Session) BeginTurn() {
 	s.ctrl.Lock()
-	s.cancel = cancel
 	s.running = true
-	s.startedAt = time.Now()
-	s.lastTool = ""
-	s.toolCalls = 0
-	s.lastToolAt = time.Time{}
 	s.ctrl.Unlock()
 }
 
-// RunningFor reports how long the in-flight turn has been running, or 0 if idle.
-func (s *Session) RunningFor() time.Duration {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	if !s.running {
-		return 0
-	}
-	return time.Since(s.startedAt)
-}
-
-// EndTurn clears the in-flight turn state.
+// EndTurn clears the in-flight marker.
 func (s *Session) EndTurn() {
 	s.ctrl.Lock()
-	s.cancel = nil
 	s.running = false
 	s.ctrl.Unlock()
-}
-
-// CancelTurn cancels the in-flight turn if one is running. Returns true if a
-// turn was actually cancelled.
-func (s *Session) CancelTurn() bool {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	if s.cancel != nil {
-		s.cancel()
-		return true
-	}
-	return false
 }
 
 // Running reports whether a turn is currently executing.
@@ -340,64 +105,25 @@ func (s *Session) Running() bool {
 	return s.running
 }
 
-// The per-conversation override fields (Model/WorkDir/Mode) and the Codex
-// thread bookkeeping (ThreadID/Turns) are mutated by control
-// commands (/model, /dir, /mode, /new) and the idle-reset path WHILE a turn is
-// concurrently reading them under mu. They are therefore guarded by ctrl (the
-// same lock /stop uses), so a command can update them while mu is held by a turn
-// without a data race. runTurn must access them only through these accessors.
-
-// GetModel / SetModel get/set the per-conversation model override.
-func (s *Session) GetModel() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Model }
-func (s *Session) SetModel(v string) { s.ctrl.Lock(); s.Model = v; s.ctrl.Unlock() }
-
-// GetEffort / SetEffort get/set the per-conversation reasoning-effort override.
-func (s *Session) GetEffort() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Effort }
-func (s *Session) SetEffort(v string) { s.ctrl.Lock(); s.Effort = v; s.ctrl.Unlock() }
-
-// GetWorkDir / SetWorkDir get/set the per-conversation working-directory override.
-func (s *Session) GetWorkDir() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.WorkDir }
-func (s *Session) SetWorkDir(v string) { s.ctrl.Lock(); s.WorkDir = v; s.ctrl.Unlock() }
-
-// GetMode / SetMode get/set the per-conversation permission-mode override.
-func (s *Session) GetMode() string  { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Mode }
-func (s *Session) SetMode(v string) { s.ctrl.Lock(); s.Mode = v; s.ctrl.Unlock() }
-
 // GetSessionID / SetSessionID get/set the resumable Codex thread id.
 func (s *Session) GetSessionID() string {
 	s.ctrl.Lock()
 	defer s.ctrl.Unlock()
 	return s.ThreadID
 }
-func (s *Session) SetSessionID(v string) { s.ctrl.Lock(); s.ThreadID = v; s.ctrl.Unlock() }
 
-// ThreadGen returns the current session generation (see the threadGen field). A
-// turn captures it before running and passes it to SetSessionIDIfGen.
-func (s *Session) ThreadGen() uint64 {
+func (s *Session) SetSessionID(v string) {
 	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	return s.threadGen
-}
-
-// SetSessionIDIfGen sets the resumable session id only if the generation still
-// matches gen (the value captured at turn start). Returns false if the session was
-// reset mid-turn (/new, idle reset), in which case the cleared context is left
-// cleared instead of being revived by this late write.
-func (s *Session) SetSessionIDIfGen(v string, gen uint64) bool {
-	s.ctrl.Lock()
-	defer s.ctrl.Unlock()
-	if s.threadGen != gen {
-		return false
-	}
 	s.ThreadID = v
-	return true
+	s.ctrl.Unlock()
 }
 
-// IncTurn increments and returns the completed-turn count.
-func (s *Session) IncTurn() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); s.Turns++; return s.Turns }
-
-// TurnCount returns the completed-turn count.
-func (s *Session) TurnCount() int { s.ctrl.Lock(); defer s.ctrl.Unlock(); return s.Turns }
+// ClearThread clears the resumable Codex thread id.
+func (s *Session) ClearThread() {
+	s.ctrl.Lock()
+	s.ThreadID = ""
+	s.ctrl.Unlock()
+}
 
 // HasSession reports whether a resumable Codex thread id is set.
 func (s *Session) HasSession() bool {
@@ -406,60 +132,50 @@ func (s *Session) HasSession() bool {
 	return s.ThreadID != ""
 }
 
-// ClearThread clears the resumable Codex thread id, starting a fresh
-// conversation on the next turn. The method name is kept for compatibility.
-func (s *Session) ClearThread() {
+// IncTurn increments and returns the completed-turn count.
+func (s *Session) IncTurn() int {
 	s.ctrl.Lock()
-	s.ThreadID = ""
-	s.threadGen++
-	s.ctrl.Unlock()
+	defer s.ctrl.Unlock()
+	s.Turns++
+	return s.Turns
+}
+
+// TurnCount returns the completed-turn count.
+func (s *Session) TurnCount() int {
+	s.ctrl.Lock()
+	defer s.ctrl.Unlock()
+	return s.Turns
 }
 
 // Manager owns the set of live sessions.
 type Manager struct {
 	mu        sync.Mutex
 	sessions  map[string]*Session
-	idleTTL   time.Duration
-	statePath string // where SaveState/LoadState persist; "" disables
+	statePath string
 }
 
-// NewManager creates a session manager. idleTTL is how long a session may be
-// idle before it is reset; zero disables expiry.
-func NewManager(idleTTL time.Duration) *Manager {
-	return &Manager{
-		sessions: make(map[string]*Session),
-		idleTTL:  idleTTL,
-	}
+// NewManager creates a session manager.
+func NewManager() *Manager {
+	return &Manager{sessions: make(map[string]*Session)}
 }
 
-// Get returns (creating if needed) the session for a conversation key. If the
-// existing session has been idle past the TTL it is reset (a fresh Codex thread
-// will be started on the next turn).
+// Get returns the session for a conversation key, creating it when needed.
 func (m *Manager) Get(key string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s, ok := m.sessions[key]
 	now := time.Now()
+	s, ok := m.sessions[key]
 	if !ok {
 		s = &Session{Key: key, LastActive: now}
 		m.sessions[key] = s
 		return s
 	}
-	if m.idleTTL > 0 && now.Sub(s.LastActive) > m.idleTTL {
-		// Only flag when there was a live context to lose — resetting an already
-		// fresh session shouldn't nag the user.
-		if s.HasSession() {
-			s.markIdleReset()
-		}
-		s.ClearThread()
-	}
 	s.LastActive = now
 	return s
 }
 
-// Reset clears the Codex thread id for a conversation, starting fresh on the
-// next turn. Returns false if no session existed.
+// Reset clears the Codex thread id for a conversation.
 func (m *Manager) Reset(key string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -469,30 +185,4 @@ func (m *Manager) Reset(key string) bool {
 	}
 	s.ClearThread()
 	return true
-}
-
-// Summary is a point-in-time view of a conversation, for status commands.
-type Summary struct {
-	Key        string
-	Active     bool // has a Codex thread id
-	Running    bool // a turn is in flight
-	Turns      int
-	LastActive time.Time
-}
-
-// Snapshot returns summaries of all live sessions.
-func (m *Manager) Snapshot() []Summary {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]Summary, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		out = append(out, Summary{
-			Key:        s.Key,
-			Active:     s.HasSession(),
-			Running:    s.Running(),
-			Turns:      s.TurnCount(),
-			LastActive: s.LastActive,
-		})
-	}
-	return out
 }

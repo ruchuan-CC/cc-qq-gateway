@@ -17,6 +17,8 @@ const (
 	BaseSandbox = "https://sandbox.api.sgroup.qq.com"
 )
 
+const qqErrTokenExpired = 11244
+
 // Client is a QQ Bot OpenAPI v2 client. It handles authentication, request
 // signing and JSON (de)serialization for every documented endpoint.
 type Client struct {
@@ -159,6 +161,10 @@ func (c *Client) doJSONOnce(ctx context.Context, method, path string, raw []byte
 		_ = json.Unmarshal(data, apiErr)
 		if apiErr.Message == "" {
 			apiErr.Message = strings.TrimSpace(string(data))
+		}
+		if apiErr.Code == qqErrTokenExpired {
+			c.tokens.Invalidate()
+			return true, apiErr
 		}
 		return resp.StatusCode >= 500, apiErr
 	}

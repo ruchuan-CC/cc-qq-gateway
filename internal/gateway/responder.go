@@ -2,11 +2,8 @@ package gateway
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
-	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync/atomic"
 
@@ -46,14 +43,13 @@ func disablesMarkdown(e *qq.APIError) bool {
 // responder sends replies back to the single-chat (C2C) user a message came from.
 // The QQ msg_seq required by the C2C send API is drawn from nextSeq, a
 // per-conversation monotonic counter (see session.Session.NextSeq) so that
-// consecutive turns, active pushes and notify messages to the same user never
-// reuse a seq — reuse is rejected by QQ as code 40054005.
+// consecutive turns and active pushes to the same user never reuse a seq — reuse
+// is rejected by QQ as code 40054005.
 type responder struct {
-	client *qq.Client
+	client qqSender
 
 	userOpenID string
 	msgID      string // inbound message id, for passive replies
-	eventID    string // event id, for passive replies to events (e.g. FRIEND_ADD) that carry no msg_id
 
 	// nextSeq yields the next monotonic msg_seq for this conversation. Always set
 	// by the gateway when building a responder (bound to the session's counter).
@@ -64,7 +60,7 @@ type responder struct {
 	// deliver the result of a turn that outran the passive-reply window.
 	active atomic.Bool
 
-	// sent counts successful sends made through this responder (text and media).
+	// sent counts successful sends made through this responder.
 	// One responder corresponds to one inbound message, so this is exactly the
 	// portion of QQ's 5-passive-replies-per-message allowance already spent —
 	// notices included — letting deliver() budget what actually remains.
@@ -85,12 +81,6 @@ func (r *responder) Active() bool { return r.active.Load() }
 // conversationKey returns the stable per-conversation key for session tracking.
 func (r *responder) conversationKey() string {
 	return "c2c:" + r.userOpenID
-}
-
-// identity returns a human-readable description of the origin, used by /whoami
-// (handy for filling in allowed_users).
-func (r *responder) identity() string {
-	return "私聊 (C2C) user open_id=" + r.userOpenID
 }
 
 // Send delivers a single message chunk to the user. When markdown is requested it
@@ -129,47 +119,11 @@ func (r *responder) Send(ctx context.Context, text string) error {
 func (r *responder) sendOnce(ctx context.Context, text string, asMarkdown bool) error {
 	req := &qq.MessageRequest{MsgSeq: r.nextSeq()}
 	if !r.active.Load() {
-		// Passive reply: bind to the inbound msg_id, or an event_id when the reply
-		// answers an event (e.g. FRIEND_ADD) that carries no message. Active pushes
-		// omit both.
+		// Passive reply: bind to the inbound msg_id. Active pushes omit it.
 		req.MsgID = r.msgID
-		if r.msgID == "" {
-			req.EventID = r.eventID
-		}
 	}
 	applyContent(req, text, asMarkdown)
 	_, err := r.client.SendC2CMessage(ctx, r.userOpenID, req)
-	return err
-}
-
-// SendMedia uploads one media item (image/file/video/audio) and sends it to the
-// user. localPath is preferred when non-empty, else the URL is uploaded by ref.
-func (r *responder) SendMedia(ctx context.Context, fileType int, localPath, url string) error {
-	up := &qq.MediaUploadRequest{FileType: fileType}
-	if url != "" {
-		up.URL = url
-	} else {
-		data, err := os.ReadFile(localPath)
-		if err != nil {
-			return fmt.Errorf("read media %s: %w", localPath, err)
-		}
-		up.FileData = base64.StdEncoding.EncodeToString(data)
-	}
-	info, err := r.client.UploadC2CMedia(ctx, r.userOpenID, up)
-	if err != nil {
-		return fmt.Errorf("upload media: %w", err)
-	}
-	req := &qq.MessageRequest{
-		MsgType: qq.MsgTypeMedia,
-		Media:   &qq.MessageMedia{FileInfo: info.FileInfo},
-		MsgSeq:  r.nextSeq(),
-	}
-	if !r.active.Load() {
-		req.MsgID = r.msgID
-	}
-	if _, err = r.client.SendC2CMessage(ctx, r.userOpenID, req); err == nil {
-		r.sent.Add(1)
-	}
 	return err
 }
 

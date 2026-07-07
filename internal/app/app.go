@@ -1,5 +1,5 @@
-// Package app assembles the gateway components from configuration and runs the
-// selected transport until the context is cancelled.
+// Package app assembles the gateway components from configuration and keeps the
+// QQ WebSocket transport running until the context is cancelled.
 package app
 
 import (
@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"time"
 
 	"github.com/chenhg5/cc-qq-gateway/internal/codex"
@@ -35,35 +34,22 @@ func New(cfg *config.Config, logger *log.Logger) *App {
 		ClientSecret: cfg.QQ.ClientSecret,
 		Sandbox:      cfg.QQ.Sandbox,
 	})
-	// Normalize a config-provided model the same way /model does. Retired provider
-	// model names are cleared so a stale config cannot wedge all future turns.
-	defaultModel := cfg.Codex.Model
-	if norm, ok := codex.NormalizeModel(defaultModel); ok {
-		defaultModel = norm
-	} else {
-		defaultModel = ""
-	}
-	defaultEffort := cfg.Codex.Effort
-	if norm, ok := codex.NormalizeEffort(defaultEffort); ok {
-		defaultEffort = norm
-	}
 	bridge := codex.New(codex.Config{
 		Binary:                     cfg.Codex.Binary,
 		WorkDir:                    cfg.Codex.WorkDir,
-		Model:                      defaultModel,
-		Effort:                     defaultEffort,
+		Model:                      cfg.Codex.Model,
+		Effort:                     cfg.Codex.Effort,
 		PermissionMode:             cfg.Codex.PermissionMode,
 		Sandbox:                    cfg.Codex.Sandbox,
 		ApprovalPolicy:             cfg.Codex.ApprovalPolicy,
 		DangerouslySkipPermissions: cfg.Codex.DangerouslySkipPermissions,
 		WebSearch:                  cfg.Codex.WebSearch,
 		AppendSystemPrompt:         cfg.Codex.AppendSystemPrompt,
-		ProtocolPrompt:             gateway.ProtocolPrompt,
 		AddDirs:                    cfg.Codex.AddDirs,
 		ExtraArgs:                  cfg.Codex.ExtraArgs,
 		Timeout:                    cfg.CodexTimeout(),
 	})
-	sessions := session.NewManager(cfg.SessionIdleTTL())
+	sessions := session.NewManager()
 	sessions.SetStatePath(cfg.Gateway.StatePath)
 	if err := sessions.LoadState(); err != nil {
 		logger.Printf("[app] warning: could not restore session state: %v", err)
@@ -71,27 +57,14 @@ func New(cfg *config.Config, logger *log.Logger) *App {
 		logger.Printf("[app] session state restored from %s", cfg.Gateway.StatePath)
 	}
 	gw := gateway.New(client, bridge, sessions, cfg.Gateway, logger)
-
 	return &App{cfg: cfg, client: client, gw: gw, logger: logger}
 }
 
-// Run supervises the configured transport and only returns when ctx is
-// cancelled. Any error or panic from the transport is logged and the transport
-// is restarted after a short, jittered delay, so the gateway is self-healing and
-// effectively never stays offline while the process is alive.
+// Run supervises the WebSocket transport. Any error or panic from the transport
+// is logged and the transport is restarted after a short, jittered delay.
 func (a *App) Run(ctx context.Context) error {
-	// Verify credentials early (best-effort, retried) so startup is observable.
 	a.awaitIdentity(ctx)
 
-	// Start the localhost notify endpoint (if configured) once for the whole
-	// process lifetime — it pushes proactive operator messages (e.g. trade close
-	// reports) independently of the transport restart loop below.
-	if ns := a.gw.NewNotifyServer(); ns != nil {
-		go ns.Run(ctx)
-	}
-
-	// Persist session state on shutdown and periodically as a safety net (state
-	// is also saved after every durable change; this catches anything missed).
 	defer a.gw.SaveState()
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -120,12 +93,11 @@ func (a *App) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// A transport that ran a while recovered cleanly; restart promptly.
 		if time.Since(start) >= time.Minute {
 			delay = minDelay
 		}
-		a.logger.Printf("[app] transport %q exited after %s: %v; restarting in ~%s",
-			a.cfg.QQ.Transport, time.Since(start).Round(time.Second), err, delay)
+		a.logger.Printf("[app] transport exited after %s: %v; restarting in ~%s",
+			time.Since(start).Round(time.Second), err, delay)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -140,8 +112,6 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
-// runTransportSafely runs the selected transport, converting a panic into an
-// error so the supervisor can restart it instead of crashing the process.
 func (a *App) runTransportSafely(ctx context.Context) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -149,18 +119,9 @@ func (a *App) runTransportSafely(ctx context.Context) (err error) {
 			a.logger.Printf("[app] recovered from panic: %v", r)
 		}
 	}()
-	switch a.cfg.QQ.Transport {
-	case "websocket":
-		return a.runWebSocket(ctx)
-	case "webhook":
-		return a.runWebhook(ctx)
-	default:
-		return fmt.Errorf("unknown transport %q", a.cfg.QQ.Transport)
-	}
+	return a.runWebSocket(ctx)
 }
 
-// awaitIdentity logs the bot identity once credentials work, retrying briefly so
-// a transient network failure at boot doesn't look like a hard error.
 func (a *App) awaitIdentity(ctx context.Context) {
 	for attempt := 1; attempt <= 5; attempt++ {
 		if ctx.Err() != nil {
@@ -183,7 +144,6 @@ func (a *App) awaitIdentity(ctx context.Context) {
 	a.logger.Printf("[app] warning: could not confirm bot identity; continuing and will retry on connect")
 }
 
-// jitter returns d perturbed by ±20% to avoid synchronized restarts.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -197,41 +157,4 @@ func (a *App) runWebSocket(ctx context.Context) error {
 	a.logger.Printf("[app] starting WebSocket transport (intents=%d)", int(intents))
 	ws := qq.NewWSClient(a.client, intents, a.gw.HandleEvent, a.logger)
 	return ws.Run(ctx)
-}
-
-func (a *App) runWebhook(ctx context.Context) error {
-	srv := qq.NewWebhookServer(a.cfg.QQ.ClientSecret, a.cfg.QQ.WebhookPath, a.gw.HandleEvent, a.logger)
-	mux := http.NewServeMux()
-	mux.Handle(srv.Path(), srv.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-
-	httpSrv := &http.Server{
-		Addr:              a.cfg.QQ.WebhookAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		a.logger.Printf("[app] starting Webhook transport on %s%s", a.cfg.QQ.WebhookAddr, srv.Path())
-		if a.cfg.QQ.WebhookTLSCert != "" && a.cfg.QQ.WebhookTLSKey != "" {
-			errCh <- httpSrv.ListenAndServeTLS(a.cfg.QQ.WebhookTLSCert, a.cfg.QQ.WebhookTLSKey)
-		} else {
-			a.logger.Printf("[app] WARNING: serving webhook without TLS; terminate TLS at a reverse proxy")
-			errCh <- httpSrv.ListenAndServe()
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
-		return ctx.Err()
-	case err := <-errCh:
-		return err
-	}
 }

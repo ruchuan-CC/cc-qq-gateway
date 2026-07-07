@@ -3,123 +3,46 @@ package session
 import (
 	"path/filepath"
 	"testing"
-	"time"
 )
 
-// TestStateRoundTrip verifies that everything durable about a conversation
-// survives a save/load cycle — the guarantee that a gateway restart is
-// invisible to the user.
 func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
+	m := NewManager()
+	m.SetStatePath(path)
 
-	m1 := NewManager(0)
-	m1.SetStatePath(path)
-	s := m1.Get("c2c:user1")
-	s.SetSessionID("sess-abc")
-	s.SetModel("gpt-5.5")
-	s.SetWorkDir("/tmp/w")
-	s.SetMode("plan")
-	s.SetTimeoutMin(45)
+	s := m.Get("c2c:user")
+	s.SetSessionID("thread-123")
 	s.IncTurn()
-	s.IncTurn()
-	s.RecordTurn("上一条消息")
-	s.SetSeed("压缩摘要内容")
-	s.QueuePending("排队中的回复")
-	for i := 0; i < 7; i++ {
-		s.NextSeq()
-	}
-	if err := m1.SaveState(); err != nil {
-		t.Fatalf("save: %v", err)
+	s.QueuePending("pending reply")
+	seq := s.NextSeq()
+	if err := m.SaveState(); err != nil {
+		t.Fatalf("SaveState: %v", err)
 	}
 
-	m2 := NewManager(0)
-	m2.SetStatePath(path)
-	if err := m2.LoadState(); err != nil {
-		t.Fatalf("load: %v", err)
+	restored := NewManager()
+	restored.SetStatePath(path)
+	if err := restored.LoadState(); err != nil {
+		t.Fatalf("LoadState: %v", err)
 	}
-	r := m2.Get("c2c:user1")
-	if got := r.GetSessionID(); got != "sess-abc" {
-		t.Errorf("session id = %q", got)
+	r := restored.Get("c2c:user")
+	if got := r.GetSessionID(); got != "thread-123" {
+		t.Fatalf("session id = %q, want thread-123", got)
 	}
-	if r.GetModel() != "gpt-5.5" || r.GetWorkDir() != "/tmp/w" || r.GetMode() != "plan" {
-		t.Errorf("overrides = %q %q %q", r.GetModel(), r.GetWorkDir(), r.GetMode())
+	if got := r.TurnCount(); got != 1 {
+		t.Fatalf("turn count = %d, want 1", got)
 	}
-	if r.GetTimeoutMin() != 45 {
-		t.Errorf("timeout = %d", r.GetTimeoutMin())
+	if got := r.TakePending(); len(got) != 1 || got[0] != "pending reply" {
+		t.Fatalf("pending = %#v", got)
 	}
-	if r.TurnCount() != 2 {
-		t.Errorf("turns = %d", r.TurnCount())
-	}
-	if r.LastPrompt() != "上一条消息" {
-		t.Errorf("last prompt = %q", r.LastPrompt())
-	}
-	if r.PeekSeed() != "压缩摘要内容" {
-		t.Errorf("seed = %q", r.PeekSeed())
-	}
-	if p := r.TakePending(); len(p) != 1 || p[0] != "排队中的回复" {
-		t.Errorf("pending = %v", p)
-	}
-	// The msg_seq counter must continue past the persisted value, never reuse.
-	if got := r.NextSeq(); got != 8 {
-		t.Errorf("next seq = %d, want 8", got)
+	if got := r.NextSeq(); got != seq+1 {
+		t.Fatalf("next seq = %d, want %d", got, seq+1)
 	}
 }
 
-// TestLoadStateMissingFile ensures a first run (no state file) is not an error.
 func TestLoadStateMissingFile(t *testing.T) {
-	m := NewManager(0)
-	m.SetStatePath(filepath.Join(t.TempDir(), "absent.json"))
+	m := NewManager()
+	m.SetStatePath(filepath.Join(t.TempDir(), "missing.json"))
 	if err := m.LoadState(); err != nil {
-		t.Fatalf("missing file should be fine: %v", err)
-	}
-}
-
-// TestIdleRestoredSessionStillExpires ensures a restored-but-stale session goes
-// through the normal idle reset (with its user-visible flag) on next contact.
-func TestIdleRestoredSessionStillExpires(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	m1 := NewManager(0)
-	m1.SetStatePath(path)
-	s := m1.Get("c2c:u")
-	s.SetSessionID("old")
-	s.LastActive = time.Now().Add(-2 * time.Hour)
-	if err := m1.SaveState(); err != nil {
-		t.Fatal(err)
-	}
-
-	m2 := NewManager(30 * time.Minute)
-	m2.SetStatePath(path)
-	if err := m2.LoadState(); err != nil {
-		t.Fatal(err)
-	}
-	r := m2.Get("c2c:u")
-	if r.GetSessionID() != "" {
-		t.Errorf("stale session should have been reset, got %q", r.GetSessionID())
-	}
-	if !r.TakeIdleReset() {
-		t.Errorf("idle reset should be flagged for the user notice")
-	}
-}
-
-// TestSeedTakeOnce ensures the compact seed is consumed exactly once.
-func TestSeedTakeOnce(t *testing.T) {
-	s := &Session{}
-	s.SetSeed("x")
-	if s.TakeSeed() != "x" || s.TakeSeed() != "" {
-		t.Error("seed must be consumed exactly once")
-	}
-}
-
-// TestAttachSessionBumpsGen ensures /resume prevents an in-flight turn from
-// overwriting the attached session id.
-func TestAttachSessionBumpsGen(t *testing.T) {
-	s := &Session{}
-	gen := s.ThreadGen()
-	s.AttachSession("newid")
-	if s.SetSessionIDIfGen("stale-write", gen) {
-		t.Error("stale generation write must be rejected after AttachSession")
-	}
-	if s.GetSessionID() != "newid" {
-		t.Errorf("session id = %q", s.GetSessionID())
+		t.Fatalf("LoadState missing file returned error: %v", err)
 	}
 }
