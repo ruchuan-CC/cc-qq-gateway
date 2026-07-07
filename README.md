@@ -99,14 +99,17 @@ CLI directly, for example `permission_mode = "bypassPermissions"`,
 支持的指令只有 5 个：
 
 - **/help** 显示中文使用说明。
-- **/model <model|default>** 切换模型，例如 `/model gpt-5.5`；`default`
-  恢复 `config.toml` 默认模型。
-- **/permissions <read-only|workspace-write|full-access|default>** 切换权限。
-  `full-access` 映射到 Codex 的
-  `--dangerously-bypass-approvals-and-sandbox`，只有管理员可用。
-- **/plan <需求>** 单次只读规划，不改变后续普通聊天的权限。
-- **/goal <目标|show|clear>** 设置、查看或清除当前 QQ 用户的会话目标。设置
-  后，后续普通消息会自动带上这个目标上下文交给 Codex。
+- **/model gpt-5.5** 切换模型。
+- **/model default** 恢复 `config.toml` 默认模型。
+- **/permissions read-only** 只读分析。
+- **/permissions workspace-write** 允许修改工作目录。
+- **/permissions full-access** 全权限，仅管理员可用；会映射到 Codex 的
+  `--dangerously-bypass-approvals-and-sandbox`。
+- **/permissions default** 恢复默认权限。
+- **/plan 需求** 单次只读规划，不改变后续普通聊天的权限。
+- **/goal 目标** 设置当前 QQ 用户的会话目标。
+- **/goal show** 查看当前会话目标。
+- **/goal clear** 清除当前会话目标。
 
 未知 `/xxx` 会作为普通 prompt 发给 Codex。核心指令需要转义时，在前面多加一
 个 `/`，例如 `//model gpt-5.5`。

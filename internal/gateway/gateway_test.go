@@ -87,6 +87,14 @@ func TestHelpCommandRepliesWithoutCallingCodex(t *testing.T) {
 		if !strings.Contains(msg.Content, "QQ-Codex 使用说明") {
 			t.Fatalf("help reply = %q, want Chinese usage text", msg.Content)
 		}
+		for _, want := range []string{"基础用法", "核心指令", "/permissions workspace-write", "/goal clear", "//model gpt-5.5"} {
+			if !strings.Contains(msg.Content, want) {
+				t.Fatalf("help reply = %q, want to contain %q", msg.Content, want)
+			}
+		}
+		if strings.Contains(msg.Content, "<") || strings.Contains(msg.Content, ">") || strings.Contains(msg.Content, "`") {
+			t.Fatalf("help reply = %q, should avoid unsupported inline-code/placeholders", msg.Content)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("QQ help reply was not sent")
 	}

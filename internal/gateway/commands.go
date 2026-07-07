@@ -60,16 +60,29 @@ func unescapeCommandText(text string) string {
 }
 
 func helpText() string {
-	return strings.TrimSpace(`## QQ-Codex 使用说明
+	return strings.TrimSpace(`# QQ-Codex 使用说明
 
-- **普通消息** 直接发给 Codex。
-- **附件** 图片、文件、视频会先保存到本地，再把路径交给 Codex。
-- **/model <model|default>** 切换模型，例如 /model gpt-5.5。
-- **/permissions <read-only|workspace-write|full-access|default>** 切换权限；full-access 仅管理员可用。
-- **/plan <需求>** 单次只读规划，不改变后续权限。
-- **/goal <目标|show|clear>** 设置、查看或清除当前会话目标。
+## 基础用法
 
-如果要把指令当普通内容发给 Codex，请用双斜杠转义，例如 //model gpt-5.5。`)
+- **普通消息**：直接发给 Codex。
+- **附件**：图片、文件、视频会先保存到本地，再把路径交给 Codex。
+
+## 核心指令
+
+- **/model gpt-5.5**：切换模型。
+- **/model default**：恢复默认模型。
+- **/permissions read-only**：只读分析。
+- **/permissions workspace-write**：允许修改工作目录。
+- **/permissions full-access**：全权限，仅管理员可用。
+- **/permissions default**：恢复默认权限。
+- **/plan 需求**：单次只读规划，不改变后续权限。
+- **/goal 目标**：设置当前会话目标。
+- **/goal show**：查看当前会话目标。
+- **/goal clear**：清除当前会话目标。
+
+## 转义
+
+- **//model gpt-5.5**：把 /model 当普通内容发给 Codex。`)
 }
 
 func validPermissions(v string) bool {
